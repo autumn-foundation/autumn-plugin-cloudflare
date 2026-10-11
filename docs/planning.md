@@ -18,7 +18,10 @@ Add one line to the app: `.plugin(CloudflarePlugin::new())`.
 - Layers from `AppBuilder::layer` run inside `TrustedProxiesLayer`. They
   run outside rate limiting, maintenance mode, bot protection, CSRF,
   trusted hosts, and the handlers. A plugin layer can correct the
-  identity, and all of these features then use the corrected value.
+  identity before these features run.
+- The rate limiter does not read `ResolvedClientIdentity`. It resolves
+  the client IP again from the peer (`ConnectInfo`) and
+  `X-Forwarded-For`. (Found during the RED phase.)
 - The access log, metrics, and tenancy layers run outside plugin layers.
   They use the identity from `[security.trusted_proxies]`.
 - Cloudflare sends `CF-Connecting-IP` (one IP), `CF-Connecting-IPv6`
@@ -67,6 +70,7 @@ Question: "How can we make this plugin fail?" Each answer gives a guard.
 
 | How to cause failure | Guard |
 |---|---|
+| Correct only `ResolvedClientIdentity`. The rate limiter resolves the IP again from the peer and `X-Forwarded-For`. All visitors share the limit of the edge. | For a verified request, also set `ConnectInfo` and `X-Forwarded-For` to the visitor IP. Remove `X-Real-IP`. The e2e test checks the real rate limiter. |
 | A client sends `CF-Connecting-IP` directly to the origin. | Use the header only when the peer is in a Cloudflare range. Remove all `cf-*` headers and `true-client-ip` from other peers. |
 | Only configure `[security.trusted_proxies]` with Cloudflare ranges. A Worker request comes from a Cloudflare IP. Autumn skips it and trusts the attacker's `X-Forwarded-For` entry. | Read `CF-Connecting-IP`, which Cloudflare always overwrites. Do not walk `X-Forwarded-For`. |
 | Bind Autumn on `[::]`. IPv4 peers appear as `::ffff:a.b.c.d`. The range check fails. | Convert IPv4-mapped IPv6 addresses to IPv4 before the check. |

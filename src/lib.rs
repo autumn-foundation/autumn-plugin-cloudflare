@@ -1,4 +1,37 @@
 //! Run an [Autumn](https://autumn-web.app) application behind Cloudflare.
+//!
+//! Add the plugin. Do not change the call to `run()`:
+//!
+//! ```rust,no_run
+//! use autumn_plugin_cloudflare::CloudflarePlugin;
+//! use autumn_web::prelude::*;
+//!
+//! #[get("/")]
+//! async fn index() -> &'static str {
+//!     "hello"
+//! }
+//!
+//! #[autumn_web::main]
+//! async fn main() {
+//!     autumn_web::app()
+//!         .plugin(CloudflarePlugin::new())
+//!         .routes(routes![index])
+//!         .run()
+//!         .await;
+//! }
+//! ```
+//!
+//! The plugin checks each request:
+//!
+//! - **From a Cloudflare edge:** `ClientAddr` and the Autumn rate limits
+//!   use the visitor IP from `CF-Connecting-IP`. Handlers can read
+//!   [`CloudflareRequest`].
+//! - **From another peer:** the plugin removes all `cf-*` headers. With
+//!   [`CloudflarePlugin::lock_origin`], it returns `403 Forbidden`.
+//!
+//! [`CacheTags`] adds a `Cache-Tag` header. [`CloudflareCache`] purges
+//! the Cloudflare cache. See the
+//! [design record](https://github.com/autumn-foundation/autumn-plugin-cloudflare/blob/main/docs/adr/0001-identity-layer.md).
 
 mod cache_tags;
 mod core;

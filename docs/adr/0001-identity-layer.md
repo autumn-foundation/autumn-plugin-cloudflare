@@ -32,14 +32,18 @@ request, the layer:
    - `Direct`: all other cases.
 3. Removes the shared-secret header.
 4. `Verified`: sets `ResolvedClientIdentity.addr` and `.scheme` from the
-   Cloudflare headers. Adds a `CloudflareRequest` extension.
+   Cloudflare headers. Sets `ConnectInfo` and `X-Forwarded-For` to the
+   visitor IP, and `X-Forwarded-Proto` to the scheme. Removes
+   `X-Real-IP`. Adds a `CloudflareRequest` extension. The rate limiter
+   resolves the IP again from the peer and `X-Forwarded-For`, so these
+   values must also be the visitor IP.
 5. `Direct`: removes all `cf-*` headers and `true-client-ip`.
 6. `Reject`: returns `403`.
 
 ```mermaid
 flowchart TD
     A[Request] --> B{Peer in Cloudflare ranges<br/>and secret OK?}
-    B -- yes --> V[Verified: set ClientAddr and ClientScheme<br/>from CF headers, add CloudflareRequest]
+    B -- yes --> V[Verified: set identity, ConnectInfo,<br/>X-Forwarded-For from CF headers,<br/>add CloudflareRequest]
     B -- no --> C{Origin lock on and<br/>peer not in allow list?}
     C -- yes --> R[403 Forbidden]
     C -- no --> D[Direct: remove cf-* headers,<br/>keep Autumn identity]
@@ -52,7 +56,10 @@ flowchart TD
 Good:
 
 - No change to `autumn-web`.
-- Every Autumn feature inside the user layers uses the visitor IP.
+- Every Autumn feature inside the user layers uses the visitor IP. This
+  includes features that resolve the IP again, such as the rate limiter.
+- Handlers that read `ConnectInfo` get the visitor IP.
+  `CloudflareRequest::edge_ip` gives the edge IP.
 - The pure decision is small. Verus proves its rules.
 
 Bad:

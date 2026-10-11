@@ -197,8 +197,7 @@ impl CloudflareRanges {
     /// (`::ffff:a.b.c.d`) is checked as IPv4.
     #[must_use]
     pub fn contains(&self, ip: IpAddr) -> bool {
-        let ip = ip.to_canonical();
-        self.ranges.iter().any(|r| r.contains(ip))
+        any_contains(&self.ranges, ip)
     }
 }
 
