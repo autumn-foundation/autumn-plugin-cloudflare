@@ -35,60 +35,121 @@ pub enum ClientIpSource {
     Peer,
 }
 
-/// Twin of `prefix_match_v4`.
+/// True when the top `prefix` bits of `addr` and `network` are equal.
+/// A prefix above 32 never matches.
 #[must_use]
-pub const fn prefix_match_v4(_network: u32, _prefix: u8, _addr: u32) -> bool {
-    todo!()
+pub const fn prefix_match_v4(network: u32, prefix: u8, addr: u32) -> bool {
+    if prefix == 0 {
+        true
+    } else if prefix > 32 {
+        false
+    } else {
+        let shift = 32 - prefix as u32;
+        (network >> shift) == (addr >> shift)
+    }
 }
 
-/// Twin of `prefix_match_v6`.
+/// The IPv6 version of [`prefix_match_v4`]. A prefix above 128 never
+/// matches.
 #[must_use]
-pub const fn prefix_match_v6(_network: u128, _prefix: u8, _addr: u128) -> bool {
-    todo!()
+pub const fn prefix_match_v6(network: u128, prefix: u8, addr: u128) -> bool {
+    if prefix == 0 {
+        true
+    } else if prefix > 128 {
+        false
+    } else {
+        let shift = 128 - prefix as u32;
+        (network >> shift) == (addr >> shift)
+    }
 }
 
-/// Twin of `range_is_safe`.
+/// True when a range is narrow enough for a Cloudflare list.
 #[must_use]
-pub const fn range_is_safe(_is_v4: bool, _prefix: u8) -> bool {
-    todo!()
+pub const fn range_is_safe(is_v4: bool, prefix: u8) -> bool {
+    if is_v4 {
+        MIN_V4_PREFIX <= prefix && prefix <= 32
+    } else {
+        MIN_V6_PREFIX <= prefix && prefix <= 128
+    }
 }
 
-/// Twin of `decide`.
+/// The edge check. Only a Cloudflare peer with the correct secret is
+/// verified. The lock rejects all other peers that are not allowed.
+#[allow(
+    clippy::fn_params_excessive_bools,
+    reason = "the four inputs are the Verus model inputs"
+)]
 #[must_use]
-pub const fn decide(_is_edge: bool, _secret_ok: bool, _allowed: bool, _lock: bool) -> Decision {
-    todo!()
+pub const fn decide(is_edge: bool, secret_ok: bool, allowed: bool, lock: bool) -> Decision {
+    if is_edge && secret_ok {
+        Decision::Verified
+    } else if lock && !allowed {
+        Decision::Reject
+    } else {
+        Decision::Direct
+    }
 }
 
-/// Twin of `choose_client_ip`.
+/// The client IP: an IPv6 value from `CF-Connecting-IPv6`, then
+/// `CF-Connecting-IP`, then the peer.
 #[must_use]
-pub fn choose_client_ip(
-    _v6_header: Option<IpAddr>,
-    _ip_header: Option<IpAddr>,
-    _peer: IpAddr,
+pub const fn choose_client_ip(
+    v6_header: Option<IpAddr>,
+    ip_header: Option<IpAddr>,
+    peer: IpAddr,
 ) -> (IpAddr, ClientIpSource) {
-    todo!()
+    match v6_header {
+        Some(ip @ IpAddr::V6(_)) => (ip, ClientIpSource::ConnectingIpv6),
+        _ => match ip_header {
+            Some(ip) => (ip, ClientIpSource::ConnectingIp),
+            None => (peer, ClientIpSource::Peer),
+        },
+    }
 }
 
-/// Twin of `constant_time_eq`.
+/// Compare two byte strings. The time does not depend on the position of
+/// the first difference.
 #[must_use]
-pub fn constant_time_eq(_a: &[u8], _b: &[u8]) -> bool {
-    todo!()
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
 }
 
-/// Twin of `valid_tag`.
+/// True when `t` is a valid cache tag: 1 to 1,024 bytes of printable
+/// ASCII, with no space and no comma.
 #[must_use]
-pub fn valid_tag(_t: &[u8]) -> bool {
-    todo!()
+pub fn valid_tag(t: &[u8]) -> bool {
+    if t.is_empty() || t.len() > MAX_TAG_LEN {
+        return false;
+    }
+    t.iter().all(|&b| (0x21..=0x7e).contains(&b) && b != b',')
 }
 
-/// Twin of `tags_header_len`.
+/// The length of the tags joined with commas. `None` when the value is
+/// longer than [`MAX_HEADER_LEN`].
 #[must_use]
-pub fn tags_header_len(_lens: &[usize]) -> Option<usize> {
-    todo!()
+pub fn tags_header_len(lens: &[usize]) -> Option<usize> {
+    let mut total: usize = 0;
+    for (i, &len) in lens.iter().enumerate() {
+        let sep = usize::from(i != 0);
+        if total + sep > MAX_HEADER_LEN || len > MAX_HEADER_LEN - total - sep {
+            return None;
+        }
+        total = total + sep + len;
+    }
+    Some(total)
 }
 
-/// Twin of `batch_count`.
+/// The number of batches of `size` items for `n` items. `size` must be 1
+/// or more.
 #[must_use]
-pub const fn batch_count(_n: usize, _size: usize) -> usize {
-    todo!()
+pub const fn batch_count(n: usize, size: usize) -> usize {
+    let q = n / size;
+    if n.is_multiple_of(size) { q } else { q + 1 }
 }

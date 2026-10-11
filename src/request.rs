@@ -1,8 +1,17 @@
 //! The `CloudflareRequest` extractor.
 
+use std::convert::Infallible;
 use std::net::IpAddr;
 
+use axum::extract::{FromRequestParts, OptionalFromRequestParts};
+use http::StatusCode;
+use http::request::Parts;
+
 /// Cloudflare data for a request that came from Cloudflare.
+///
+/// The plugin adds it only to verified requests. Use
+/// `Option<CloudflareRequest>` for routes that also get direct requests.
+/// Without the data, the extractor returns `403 Forbidden`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareRequest {
     pub(crate) client_ip: IpAddr,
@@ -32,7 +41,8 @@ impl CloudflareRequest {
         self.ray.as_deref()
     }
 
-    /// The visitor country (`CF-IPCountry`).
+    /// The two-letter visitor country (`CF-IPCountry`). Cloudflare uses
+    /// `XX` for "unknown" and `T1` for Tor.
     #[must_use]
     pub fn country(&self) -> Option<&str> {
         self.country.as_deref()
@@ -51,24 +61,24 @@ impl CloudflareRequest {
     }
 }
 
-impl<S: Send + Sync> axum::extract::FromRequestParts<S> for CloudflareRequest {
-    type Rejection = (http::StatusCode, &'static str);
+impl<S: Send + Sync> FromRequestParts<S> for CloudflareRequest {
+    type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(
-        _parts: &mut http::request::Parts,
-        _state: &S,
-    ) -> Result<Self, Self::Rejection> {
-        todo!()
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        parts.extensions.get::<Self>().cloned().ok_or((
+            StatusCode::FORBIDDEN,
+            "the request did not come through Cloudflare",
+        ))
     }
 }
 
-impl<S: Send + Sync> axum::extract::OptionalFromRequestParts<S> for CloudflareRequest {
-    type Rejection = std::convert::Infallible;
+impl<S: Send + Sync> OptionalFromRequestParts<S> for CloudflareRequest {
+    type Rejection = Infallible;
 
     async fn from_request_parts(
-        _parts: &mut http::request::Parts,
+        parts: &mut Parts,
         _state: &S,
     ) -> Result<Option<Self>, Self::Rejection> {
-        todo!()
+        Ok(parts.extensions.get::<Self>().cloned())
     }
 }

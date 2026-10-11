@@ -24,10 +24,13 @@ struct Recorded {
     body: Value,
 }
 
+/// Status, `Retry-After`, and body of one reply.
+type Reply = (u16, Option<&'static str>, Value);
+
 #[derive(Clone, Default)]
 struct Fake {
     seen: Arc<Mutex<Vec<Recorded>>>,
-    replies: Arc<Mutex<VecDeque<(u16, Option<&'static str>, Value)>>>,
+    replies: Arc<Mutex<VecDeque<Reply>>>,
 }
 
 impl Fake {
@@ -58,11 +61,13 @@ async fn purge(
         body: body.0,
     });
     let next = fake.replies.lock().expect("lock").pop_front();
-    let (status, retry_after, body) = next.unwrap_or((
-        200,
-        None,
-        json!({"success": true, "errors": [], "messages": [], "result": {"id": "x"}}),
-    ));
+    let (status, retry_after, body) = next.unwrap_or_else(|| {
+        (
+            200,
+            None,
+            json!({"success": true, "errors": [], "messages": [], "result": {"id": "x"}}),
+        )
+    });
     let mut res = (
         StatusCode::from_u16(status).expect("status"),
         axum::Json(body),
