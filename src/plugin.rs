@@ -1,6 +1,7 @@
 //! `CloudflarePlugin`: options and wiring.
 
 use std::fmt;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
@@ -22,20 +23,23 @@ const MIN_REFRESH: Duration = Duration::from_secs(60);
 
 /// The IP that the plugin checks against the Cloudflare ranges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PeerSource {
     /// The TCP peer. Use this when Cloudflare connects to Autumn directly.
     #[default]
     Socket,
     /// The client IP that Autumn resolved from `[security.trusted_proxies]`.
-    /// Use this when a load balancer is between Cloudflare and Autumn.
-    /// Configure the load balancer as a trusted proxy.
+    /// Use this when a load balancer is between Cloudflare and the app.
+    /// Set `trust_forwarded_headers = true` and put only the load balancer
+    /// in `ranges`. Do not set `trusted_hops`. Do not put Cloudflare
+    /// ranges in `ranges`.
     Resolved,
 }
 
-/// Run an Autumn app behind Cloudflare.
+/// Runs an Autumn app behind Cloudflare.
 ///
-/// The plugin adds one layer. For a request from a Cloudflare edge, the
-/// layer sets the client IP and scheme from the Cloudflare headers. For
+/// The plugin adds one layer. For a verified request (from an edge), the
+/// layer sets the visitor IP and scheme from the Cloudflare headers. For
 /// other requests, it removes the Cloudflare headers.
 ///
 /// ```rust,no_run
@@ -67,6 +71,21 @@ pub struct CloudflarePlugin {
     cache: Option<CloudflareCache>,
 }
 
+impl Clone for CloudflarePlugin {
+    fn clone(&self) -> Self {
+        Self {
+            ranges: self.ranges.clone(),
+            peer_source: self.peer_source,
+            lock: self.lock,
+            allow: self.allow.clone(),
+            secret: self.secret.clone(),
+            refresh: self.refresh,
+            ranges_url: self.ranges_url.clone(),
+            cache: self.cache.clone(),
+        }
+    }
+}
+
 impl fmt::Debug for CloudflarePlugin {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CloudflarePlugin")
@@ -89,7 +108,7 @@ impl Default for CloudflarePlugin {
 }
 
 impl CloudflarePlugin {
-    /// Make a plugin with the default options: the built-in ranges, the
+    /// Makes a plugin with the default options: the built-in ranges, the
     /// socket peer, no origin lock, no secret, and no refresh.
     #[must_use]
     pub fn new() -> Self {
@@ -105,14 +124,15 @@ impl CloudflarePlugin {
         }
     }
 
-    /// Use these ranges instead of the built-in list.
+    /// Uses these ranges instead of the built-in list. A range refresh
+    /// replaces them.
     #[must_use]
     pub fn ranges(mut self, ranges: CloudflareRanges) -> Self {
         self.ranges = ranges;
         self
     }
 
-    /// Set the IP that the plugin checks. The default is
+    /// Sets the IP that the plugin checks. The default is
     /// [`PeerSource::Socket`].
     #[must_use]
     pub const fn peer_source(mut self, source: PeerSource) -> Self {
@@ -120,26 +140,28 @@ impl CloudflarePlugin {
         self
     }
 
-    /// When `true`, return `403 Forbidden` to peers that are not Cloudflare
-    /// and not in an [`allow`](Self::allow) range. The default is `false`.
+    /// When `lock` is `true`, the plugin returns `403 Forbidden` for each
+    /// request that is not verified and not from an
+    /// [`allow`](Self::allow) range. The default is `false`.
     #[must_use]
     pub const fn lock_origin(mut self, lock: bool) -> Self {
         self.lock = lock;
         self
     }
 
-    /// Let peers in this range pass the origin lock, for example health
-    /// checks. The plugin removes their Cloudflare headers.
+    /// Lets peers in this range pass the origin lock. Use it for health
+    /// checks. The plugin removes the Cloudflare headers from these
+    /// requests. The plugin does not check the width of the range.
     #[must_use]
     pub fn allow(mut self, range: IpRange) -> Self {
         self.allow.push(range);
         self
     }
 
-    /// Require the header `name` with the value `value` from Cloudflare.
-    /// Add the header with a Cloudflare Transform Rule.
+    /// Requires the header `name` with the value `value` on each verified
+    /// request. Add the header with a Cloudflare Transform Rule.
     ///
-    /// A request without the correct value is not from Cloudflare. The
+    /// The plugin does not verify a request without the correct value. The
     /// plugin removes the header before the handler. An empty value never
     /// matches.
     #[must_use]
@@ -148,24 +170,31 @@ impl CloudflarePlugin {
         self
     }
 
-    /// Get the range list from the Cloudflare API at startup and then at
-    /// each interval. The plugin uses 60 seconds or more. If a refresh
-    /// fails, the plugin logs a warning and keeps the last good list.
+    /// Gets the range list from the range API at startup and then at each
+    /// interval.
+    ///
+    /// If `interval` is less than 60 seconds, the plugin uses 60 seconds.
+    /// The first request runs after startup, so the old list stays in use
+    /// for a short time. A good answer replaces the list from
+    /// [`ranges`](Self::ranges). If a refresh fails, the plugin logs a
+    /// warning and keeps the last good list. In Autumn task mode
+    /// (`AUTUMN_RUN_TASK`), the plugin does not refresh.
     #[must_use]
     pub fn refresh_ranges(mut self, interval: Duration) -> Self {
         self.refresh = Some(interval.max(MIN_REFRESH));
         self
     }
 
-    /// Set the URL of the range API. The default is
-    /// `https://api.cloudflare.com/client/v4/ips`.
+    /// Sets the URL of the range API. The default is
+    /// `https://api.cloudflare.com/client/v4/ips`. The URL must use `https`.
+    /// Only a loopback host can use `http`.
     #[must_use]
     pub fn ranges_url(mut self, url: impl Into<String>) -> Self {
         self.ranges_url = url.into();
         self
     }
 
-    /// Put a purge client in the app state. Handlers can then use
+    /// Puts a purge client in the app state. Handlers can then use
     /// [`CloudflareCache`] as an extractor.
     #[must_use]
     pub fn cache(mut self, cache: CloudflareCache) -> Self {
@@ -173,8 +202,9 @@ impl CloudflarePlugin {
         self
     }
 
-    /// Make the Tower layer for these options. Each call makes a new
-    /// layer with its own range list.
+    /// Makes the Tower layer for these options. Each call makes a new
+    /// layer with its own range list. This layer does not refresh its
+    /// ranges.
     #[must_use]
     pub fn layer(&self) -> CloudflareLayer {
         if self.secret.as_ref().is_some_and(|(_, v)| v.is_empty()) {
@@ -191,6 +221,7 @@ impl CloudflarePlugin {
                 name: name.clone(),
                 value: value.as_bytes().to_vec(),
             }),
+            warned_no_identity: AtomicBool::new(false),
         })
     }
 }
@@ -208,6 +239,9 @@ impl Plugin for CloudflarePlugin {
             let url = self.ranges_url;
             app = app
                 .on_startup(move |_state| {
+                    if std::env::var_os("AUTUMN_RUN_TASK").is_some() {
+                        return std::future::ready(Ok(()));
+                    }
                     let handle = spawn_refresh(layer.clone(), url.clone(), interval);
                     let old = start
                         .lock()
@@ -216,14 +250,14 @@ impl Plugin for CloudflarePlugin {
                     if let Some(old) = old {
                         old.abort();
                     }
-                    async { Ok(()) }
+                    std::future::ready(Ok(()))
                 })
                 .on_shutdown(move || {
                     let handle = task.lock().unwrap_or_else(PoisonError::into_inner).take();
                     if let Some(handle) = handle {
                         handle.abort();
                     }
-                    async {}
+                    std::future::ready(())
                 });
         }
         app

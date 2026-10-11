@@ -133,3 +133,13 @@ async fn refresh_task_keeps_running_after_a_failure() {
     task.abort();
     assert_eq!(*layer.current_ranges(), CloudflareRanges::builtin());
 }
+
+#[tokio::test]
+async fn plain_http_range_url_is_rejected_for_other_hosts() {
+    let layer = CloudflarePlugin::new().layer();
+    let err = refresh_once(&layer, "http://api.cloudflare.com/client/v4/ips")
+        .await
+        .expect_err("insecure");
+    assert!(matches!(err, RangeError::Api(_)));
+    assert_eq!(*layer.current_ranges(), CloudflareRanges::builtin());
+}

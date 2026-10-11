@@ -81,11 +81,18 @@ Question: "How can we make this plugin fail?" Each answer gives a guard.
 | Leak the shared secret into handlers or logs. | Remove the header in all cases. `Debug` output hides the secret. |
 | Turn on the origin lock. Load balancer health checks fail. | `allow(cidr)` lets listed peers pass. Their `cf-*` headers are still removed. |
 | A changed or bad API answer for the range refresh opens `0.0.0.0/0`. | Reject a list that is empty, that has a bad entry, or that has a range broader than `/8` (IPv4) or `/16` (IPv6). Keep the last good list. |
+| Send 256 `/8` ranges. Each range passes the width check. | Reject a list with more than 1,024 ranges, or a list that covers more than one `/8` (IPv4) or one `/16` (IPv6). |
+| Send `10.0.0.0/8` from a changed API answer. Internal hosts become edges. | Reject API ranges that touch private, loopback, link-local, or shared (CGNAT) addresses. Require `https` for the range URL. |
+| A Worker in another zone sets `CF-Connecting-IPv6`. | Use `CF-Connecting-IPv6` only when `CF-Connecting-IP` is a Pseudo IPv4 (Class E) address. |
+| A client sends `X-Forwarded-Host` through Cloudflare. `ClientHost` and absolute URLs use it. | For a verified request, take the host from `Host`. Remove `X-Forwarded-Host` and `Forwarded`. |
+| A timing difference shows the length of the shared secret. | The compare loop reads the secret length. It does not stop early. |
+| An `http` API base sends the token in clear text. | Reject an API base that is not `https`. Only a loopback host can use `http`. |
+| A purge error shows a URL that holds a signed token. | The error gives the position of the item, not the item. |
 | The range refresh fails at startup. The app stops. | Log a warning. Keep the built-in list. |
 | Purge 250 URLs in one call. The API rejects it. | Send batches of 100 or less. |
 | Batch 2 of 3 fails. The caller does not know what was purged. | The error has the number of items that were purged. |
 | The API returns `429`. | `PurgeError::RateLimited` with the `Retry-After` value. |
-| The token appears in a log or a panic message. | `ApiToken` `Debug` and `Display` show `***`. |
+| The token appears in a log or a panic message. | `ApiToken` has no `Display`. Its `Debug` shows `***`. |
 | A tag has a comma or a space. Cloudflare splits it. Purge misses. | `CacheTags::new` rejects it. |
 | A response has too many tags. Cloudflare ignores the header. | Reject a header value longer than 16 KB. |
 | Register the plugin twice. Two layers run. | The default `Plugin::name` makes the second call a no-op. |
@@ -101,9 +108,8 @@ They fear that a wrong proxy setting opens a spoofing hole. A plugin
 that is safe by default feels better than a page of config.
 
 **Black hat (risks).** The built-in range list becomes old. The access
-log shows the edge IP if the user does not also configure
-`[security.trusted_proxies]`. A too-strict origin lock blocks health
-checks. Another Cloudflare zone can reach the origin. Purge rate limits.
+log shows the edge IP. A too-strict origin lock blocks health checks.
+Another Cloudflare zone can reach the origin. Purge rate limits.
 
 **Yellow hat (benefits).** No fork of `autumn-web`. Rate limits, CSRF,
 bot protection, and maintenance allow lists use the real IP. The pure
@@ -171,3 +177,20 @@ Out of scope:
 - Workers, Tunnel, and Authenticated Origin Pulls (mTLS is in Autumn
   core). These are possible later work.
 - Turnstile, R2, and DNS-01. Autumn core has them.
+
+## Review
+
+After REFACTOR, five agents reviewed the code: security, framework
+integration, tests and proofs, API and docs (ASD-STE100), and
+robustness. The fixes are in the "Reverse brainstorming" table above.
+The review also changed two Verus twins (`choose_client_ip` and
+`constant_time_eq`) and added limits to the README.
+
+Known limits (documented in the README):
+
+- The access log, metrics, tenancy, and method override run outside the
+  plugin. They see the edge IP.
+- With the Autumn `mcp` feature, the `/mcp` endpoint runs outside plugin
+  layers.
+- Unix sockets and Cloudflare Tunnel show every peer as loopback. The
+  plugin cannot verify them.

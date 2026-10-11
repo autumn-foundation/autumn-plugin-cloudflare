@@ -11,14 +11,15 @@ use http::StatusCode;
 use http::request::Parts;
 
 use crate::core::{MAX_BATCH, batch_count, valid_tag};
+use crate::refresh::secure_url;
 
-/// A Cloudflare API token with the "Cache Purge" permission. `Debug`
-/// output hides the value.
-#[derive(Clone, PartialEq, Eq)]
+/// A Cloudflare API token. Give it one permission: Zone, Cache Purge,
+/// Purge, for one zone. `Debug` output hides the value.
+#[derive(Clone)]
 pub struct ApiToken(String);
 
 impl ApiToken {
-    /// Make a token.
+    /// Makes a token.
     ///
     /// # Errors
     ///
@@ -43,6 +44,7 @@ impl fmt::Debug for ApiToken {
 
 /// One error or message from the Cloudflare API.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[non_exhaustive]
 pub struct ApiMessage {
     /// The Cloudflare code.
     #[serde(default)]
@@ -54,6 +56,7 @@ pub struct ApiMessage {
 
 /// The result of a purge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PurgeReport {
     /// The number of API requests.
     pub requests: usize,
@@ -62,7 +65,11 @@ pub struct PurgeReport {
 }
 
 /// A purge error.
+///
+/// The `purged` value is a lower bound. After a transport error, the API
+/// possibly purged the last batch.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PurgeError {
     /// The input is not valid.
     #[error("invalid purge input: {0}")]
@@ -71,21 +78,23 @@ pub enum PurgeError {
     #[error("environment variable `{0}` is not set")]
     MissingEnv(&'static str),
     /// The API rate limit was reached.
-    #[error("the Cloudflare API rate limit was reached after {purged} items")]
+    #[error(
+        "the Cloudflare API rate limit stopped the purge after {purged} items (retry after: {retry_after:?})"
+    )]
     RateLimited {
-        /// The `Retry-After` time.
+        /// The `Retry-After` time in seconds, 3,600 or less.
         retry_after: Option<Duration>,
-        /// The number of items that were purged before the error.
+        /// The number of items that the client purged before the error.
         purged: usize,
     },
     /// The API returned an error.
     #[error("the Cloudflare API returned status {status} after {purged} items")]
     Api {
         /// The HTTP status.
-        status: u16,
+        status: StatusCode,
         /// The API errors.
         errors: Vec<ApiMessage>,
-        /// The number of items that were purged before the error.
+        /// The number of items that the client purged before the error.
         purged: usize,
     },
     /// The request failed.
@@ -93,13 +102,13 @@ pub enum PurgeError {
     Transport {
         /// The error text.
         message: String,
-        /// The number of items that were purged before the error.
+        /// The number of items that the client purged before the error.
         purged: usize,
     },
 }
 
 impl PurgeError {
-    /// The number of items that were purged before the error.
+    /// The number of items that the client purged before the error.
     #[must_use]
     pub const fn purged(&self) -> usize {
         match self {
@@ -117,10 +126,18 @@ const DEFAULT_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 /// The time limit for one purge request.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The longest `Retry-After` time that the client reports.
+const MAX_RETRY_AFTER_SECS: u64 = 3600;
+
 /// A client for the Cloudflare cache purge API.
 ///
-/// The client sends batches of 100 items or less. It does not retry. On
-/// an error, it stops and tells how many items it purged.
+/// The client sends batches of 100 items or less, one after the other. It
+/// does not retry. On an error, it stops. The error gives the number of
+/// purged items. Each request uses a new connection. For a large purge,
+/// use a background job.
+///
+/// The API base URL must use `https`. Only a loopback host can use
+/// `http`.
 ///
 /// ```rust,no_run
 /// # async fn run() -> Result<(), autumn_plugin_cloudflare::PurgeError> {
@@ -159,7 +176,7 @@ struct ApiResponse {
 }
 
 impl CloudflareCache {
-    /// Make a client for one zone.
+    /// Makes a client for one zone.
     ///
     /// # Errors
     ///
@@ -184,7 +201,7 @@ impl CloudflareCache {
         })
     }
 
-    /// Make a client from `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`.
+    /// Makes a client from `CLOUDFLARE_ZONE_ID` and `CLOUDFLARE_API_TOKEN`.
     ///
     /// # Errors
     ///
@@ -193,7 +210,7 @@ impl CloudflareCache {
         cache_from_lookup(|name| std::env::var(name).ok())
     }
 
-    /// Set the API base URL. The default is
+    /// Sets the API base URL. The default is
     /// `https://api.cloudflare.com/client/v4`.
     #[must_use]
     pub fn api_base(mut self, url: impl Into<String>) -> Self {
@@ -203,15 +220,15 @@ impl CloudflareCache {
         self
     }
 
-    /// Set the number of items in one request. The client uses 1 to 100.
-    /// The default is 100.
+    /// Sets the number of items in one request. The default is 100. A
+    /// value less than 1 becomes 1. A value more than 100 becomes 100.
     #[must_use]
     pub fn batch_size(mut self, size: usize) -> Self {
         self.batch_size = size.clamp(1, MAX_BATCH);
         self
     }
 
-    /// Purge URLs. Each URL starts with `http://` or `https://`.
+    /// Purges URLs. Each URL starts with `http://` or `https://`.
     ///
     /// # Errors
     ///
@@ -225,7 +242,7 @@ impl CloudflareCache {
             .await
     }
 
-    /// Purge cache tags. See [`CacheTags`](crate::CacheTags).
+    /// Purges cache tags. See [`CacheTags`](crate::CacheTags).
     ///
     /// # Errors
     ///
@@ -239,7 +256,7 @@ impl CloudflareCache {
             .await
     }
 
-    /// Purge URL prefixes, for example `www.example.com/blog/`. A prefix
+    /// Purges URL prefixes, for example `www.example.com/blog/`. A prefix
     /// has no scheme.
     ///
     /// # Errors
@@ -254,7 +271,7 @@ impl CloudflareCache {
             .await
     }
 
-    /// Purge hosts, for example `img.example.com`.
+    /// Purges hosts, for example `img.example.com`.
     ///
     /// # Errors
     ///
@@ -268,7 +285,7 @@ impl CloudflareCache {
             .await
     }
 
-    /// Purge all files in the zone.
+    /// Purges all files in the zone.
     ///
     /// # Errors
     ///
@@ -302,6 +319,11 @@ impl CloudflareCache {
     }
 
     async fn send(&self, body: &serde_json::Value, purged: usize) -> Result<(), PurgeError> {
+        if !secure_url(&self.api_base) {
+            return Err(PurgeError::InvalidInput(
+                "the API base URL must use https, or http with a loopback host".to_owned(),
+            ));
+        }
         let url = format!("{}/zones/{}/purge_cache", self.api_base, self.zone_id);
         let response = self
             .client
@@ -316,14 +338,14 @@ impl CloudflareCache {
                 message: e.to_string(),
                 purged,
             })?;
-        let status = response.status().as_u16();
-        if status == 429 {
+        let status = response.status();
+        if status == StatusCode::TOO_MANY_REQUESTS {
             let retry_after = response
                 .headers()
                 .get("retry-after")
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
+                .map(|secs| Duration::from_secs(secs.min(MAX_RETRY_AFTER_SECS)));
             return Err(PurgeError::RateLimited {
                 retry_after,
                 purged,
@@ -346,7 +368,9 @@ impl CloudflareCache {
     }
 }
 
-/// Check and collect the items. The first bad item stops the purge.
+/// Checks and collects the items. The first bad item stops the purge. The
+/// error gives the position of the item, not the item, because a URL can
+/// hold a secret.
 fn collect<I, S>(items: I, valid: fn(&str) -> bool, kind: &str) -> Result<Vec<String>, PurgeError>
 where
     I: IntoIterator<Item = S>,
@@ -354,12 +378,15 @@ where
 {
     items
         .into_iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(position, item)| {
             let item = item.as_ref();
             if valid(item) {
                 Ok(item.to_owned())
             } else {
-                Err(PurgeError::InvalidInput(format!("invalid {kind} `{item}`")))
+                Err(PurgeError::InvalidInput(format!(
+                    "invalid {kind} at position {position}"
+                )))
             }
         })
         .collect()
@@ -415,7 +442,7 @@ impl FromRequestParts<AppState> for CloudflareCache {
     }
 }
 
-/// Make a client from a variable lookup. `from_env` uses `std::env::var`.
+/// Makes a client from a variable lookup. `from_env` uses `std::env::var`.
 ///
 /// # Errors
 ///

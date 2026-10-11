@@ -32,9 +32,9 @@ request, the layer:
    - `Direct`: all other cases.
 3. Removes the shared-secret header.
 4. `Verified`: sets `ResolvedClientIdentity.addr` and `.scheme` from the
-   Cloudflare headers. Sets `ConnectInfo` and `X-Forwarded-For` to the
-   visitor IP, and `X-Forwarded-Proto` to the scheme. Removes
-   `X-Real-IP`. Adds a `CloudflareRequest` extension. The rate limiter
+   Cloudflare headers, and `.host` from `Host`. Sets `ConnectInfo` and
+   `X-Forwarded-For` to the visitor IP, and `X-Forwarded-Proto` to the
+   scheme. Removes `X-Real-IP`, `X-Forwarded-Host`, and `Forwarded`. Adds a `CloudflareRequest` extension. The rate limiter
    resolves the IP again from the peer and `X-Forwarded-For`, so these
    values must also be the visitor IP.
 5. `Direct`: removes all `cf-*` headers and `true-client-ip`.
@@ -64,7 +64,8 @@ Good:
 
 Bad:
 
-- The access log, metrics, and tenancy run outside user layers. They
-  show the identity from `[security.trusted_proxies]`. The README tells
-  users how to configure it for logs.
+- The access log, metrics, tenancy, and method override run outside
+  user layers. They show the edge IP. The README lists this limit.
+- With the Autumn `mcp` feature, the `/mcp` endpoint runs outside user
+  layers.
 - The built-in range list can become old. `refresh_ranges` fixes this.

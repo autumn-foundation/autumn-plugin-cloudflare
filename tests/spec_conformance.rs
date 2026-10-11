@@ -5,12 +5,21 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use autumn_plugin_cloudflare::__private::{
-    ClientIpSource, Decision, MAX_BATCH, MAX_HEADER_LEN, MAX_TAG_LEN, MIN_V4_PREFIX, MIN_V6_PREFIX,
-    batch_count, choose_client_ip, constant_time_eq, decide, prefix_match_v4, prefix_match_v6,
-    range_is_safe, tags_header_len, valid_tag,
+    ClientIpSource, Decision, MAX_BATCH, MAX_HEADER_LEN, MAX_RANGES, MAX_TAG_LEN, MAX_V4_COVERAGE,
+    MAX_V6_COVERAGE, MIN_V4_PREFIX, MIN_V6_PREFIX, batch_count, choose_client_ip, constant_time_eq,
+    decide, is_pseudo_ipv4, prefix_match_v4, prefix_match_v6, range_is_safe, tags_header_len,
+    valid_tag,
 };
-use autumn_plugin_cloudflare::IpRange;
+use autumn_plugin_cloudflare::{CloudflareRanges, IpRange, RangeError};
 use proptest::prelude::*;
+
+/// IPs with many Pseudo IPv4 (Class E) values.
+fn ip_strategy() -> impl Strategy<Value = IpAddr> {
+    prop_oneof![
+        any::<IpAddr>(),
+        (0xf000_0000u32..=u32::MAX).prop_map(|a| IpAddr::V4(Ipv4Addr::from(a))),
+    ]
+}
 
 /// Bit by bit: the top `prefix` bits are equal.
 fn naive_match(network: u128, addr: u128, prefix: u32, width: u32) -> bool {
@@ -71,19 +80,49 @@ proptest! {
     }
 
     #[test]
-    fn choose_agrees_with_spec(v6 in proptest::option::of(any::<IpAddr>()), ip in proptest::option::of(any::<IpAddr>()), peer: IpAddr) {
+    fn choose_agrees_with_spec(v6 in proptest::option::of(any::<IpAddr>()), ip in proptest::option::of(ip_strategy()), peer: IpAddr) {
         let (got, source) = choose_client_ip(v6, ip, peer);
+        let pseudo = matches!(ip, Some(IpAddr::V4(a)) if u32::from(a) >= 0xf000_0000);
         match (v6, ip) {
-            (Some(a @ IpAddr::V6(_)), _) => prop_assert_eq!((got, source), (a, ClientIpSource::ConnectingIpv6)),
+            (Some(a @ IpAddr::V6(_)), Some(_)) if pseudo => prop_assert_eq!((got, source), (a, ClientIpSource::ConnectingIpv6)),
             (_, Some(b)) => prop_assert_eq!((got, source), (b, ClientIpSource::ConnectingIp)),
             (_, None) => prop_assert_eq!((got, source), (peer, ClientIpSource::Peer)),
         }
     }
 
     #[test]
+    fn pseudo_ipv4_is_class_e(a: u32) {
+        prop_assert_eq!(is_pseudo_ipv4(a), Ipv4Addr::from(a).octets()[0] >= 240);
+    }
+
+    #[test]
     fn constant_time_eq_is_eq(a in proptest::collection::vec(any::<u8>(), 0..40), b in proptest::collection::vec(any::<u8>(), 0..40)) {
         prop_assert_eq!(constant_time_eq(&a, &b), a == b);
         prop_assert!(constant_time_eq(&a, &a));
+    }
+
+    #[test]
+    fn constant_time_eq_handles_prefixes(a in proptest::collection::vec(any::<u8>(), 0..40), extra in proptest::collection::vec(any::<u8>(), 1..5)) {
+        let mut longer = a.clone();
+        longer.extend(&extra);
+        prop_assert!(!constant_time_eq(&a, &longer));
+        prop_assert!(!constant_time_eq(&longer, &a));
+    }
+
+    #[test]
+    fn coverage_limit_agrees_with_spec(prefixes in proptest::collection::vec(8u8..=32, 1..20)) {
+        let ranges: Vec<String> = prefixes
+            .iter()
+            .enumerate()
+            .map(|(i, p)| format!("{}.0.0.0/{p}", 11 + i))
+            .collect();
+        let total: u128 = prefixes.iter().map(|p| 1u128 << (32 - u32::from(*p))).sum();
+        let result = CloudflareRanges::parse(&ranges);
+        if total <= MAX_V4_COVERAGE {
+            prop_assert!(result.is_ok());
+        } else {
+            prop_assert_eq!(result, Err(RangeError::TooLarge));
+        }
     }
 
     #[test]
@@ -141,6 +180,9 @@ fn limits_match_the_model() {
     assert_eq!(MAX_TAG_LEN, 1024);
     assert_eq!(MAX_HEADER_LEN, 16384);
     assert_eq!(MAX_BATCH, 100);
+    assert_eq!(MAX_RANGES, 1024);
+    assert_eq!(MAX_V4_COVERAGE, 1 << 24);
+    assert_eq!(MAX_V6_COVERAGE, 1 << 112);
     assert_eq!(batch_count(0, 1), 0);
     assert_eq!(batch_count(usize::MAX, 1), usize::MAX);
     assert_eq!(batch_count(usize::MAX, 2), usize::MAX / 2 + 1);

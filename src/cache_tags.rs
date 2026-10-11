@@ -13,6 +13,7 @@ const CACHE_TAG: HeaderName = HeaderName::from_static("cache-tag");
 
 /// An error in a cache tag list.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CacheTagError {
     /// The tag is not 1 to 1,024 bytes of printable ASCII, or it has a
     /// space or a comma.
@@ -40,7 +41,7 @@ pub struct CacheTags {
 }
 
 impl CacheTags {
-    /// Make a tag list. An empty list adds no header.
+    /// Makes a tag list. An empty list adds no header.
     ///
     /// # Errors
     ///

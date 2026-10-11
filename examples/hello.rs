@@ -51,7 +51,7 @@ async fn post(Path(id): Path<u32>) -> impl IntoResponse {
     (tags, format!("post {id}"))
 }
 
-/// Purges one cache tag.
+/// Purges one cache tag. A real app must protect this route.
 #[post("/purge/{tag}")]
 async fn purge(cache: CloudflareCache, Path(tag): Path<String>) -> (StatusCode, String) {
     match cache.purge_tags([tag]).await {

@@ -45,12 +45,19 @@ behind Cloudflare. Design: one Tower layer
 ## Important facts
 
 - Plugin layers run inside Autumn's `TrustedProxiesLayer` and outside rate
-  limits, CSRF, bot protection, maintenance mode, and handlers.
+  limits, CSRF, maintenance mode, and handlers.
 - The Autumn rate limiter does not read `ResolvedClientIdentity`. It
   resolves the IP again from `ConnectInfo` and `X-Forwarded-For`. So a
   verified request must have all three set to the visitor IP.
-- The access log, metrics, and tenancy run outside plugin layers. They
-  show the edge IP.
+- The access log, metrics, tenancy, method override, and the `/mcp`
+  endpoint run outside plugin layers. They show the edge IP.
+- `CF-Connecting-IPv6` wins only over a Pseudo IPv4 (Class E)
+  `CF-Connecting-IP`. A Worker can set `CF-Connecting-IPv6`.
+- Range lists from the API must be public and small. Outbound URLs must
+  use `https` (loopback `http` is for tests).
+- Each `no_redirect()` request builds a new client, so it uses a new
+  connection.
+- The README examples compile as doctests (`src/lib.rs`).
 - Outbound calls use `autumn_web::http::Client` with `no_retry()` and
   `no_redirect()`. A purge is not sent twice, and the token never follows
   a redirect.

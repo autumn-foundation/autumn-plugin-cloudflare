@@ -194,15 +194,18 @@ pub enum Source {
     Peer,
 }
 
-/// Spec: prefer a valid IPv6 value from `CF-Connecting-IPv6`, then
-/// `CF-Connecting-IP`, then the peer.
+/// Spec: a Pseudo IPv4 address is in the Class E range `240.0.0.0/4`.
+pub open spec fn spec_is_pseudo_ipv4(a: u32) -> bool {
+    (a >> 28u32) == 0xfu32
+}
+
+/// Spec: use `CF-Connecting-IPv6` only when Pseudo IPv4 overwrote
+/// `CF-Connecting-IP`. Then use `CF-Connecting-IP`. Then use the peer.
 pub open spec fn spec_choose(v6_header: Option<Ip>, ip_header: Option<Ip>) -> Source {
-    match v6_header {
-        Some(Ip::V6(_)) => Source::ConnectingIpv6,
-        _ => match ip_header {
-            Some(_) => Source::ConnectingIp,
-            None => Source::Peer,
-        },
+    match (v6_header, ip_header) {
+        (Some(Ip::V6(_)), Some(Ip::V4(a))) if spec_is_pseudo_ipv4(a) => Source::ConnectingIpv6,
+        (_, Some(_)) => Source::ConnectingIp,
+        (_, None) => Source::Peer,
     }
 }
 
@@ -213,13 +216,19 @@ pub fn choose_client_ip(v6_header: Option<Ip>, ip_header: Option<Ip>, peer: Ip) 
         r.1 is ConnectingIpv6 ==> v6_header == Some(r.0) && r.0 is V6,
         r.1 is ConnectingIp ==> ip_header == Some(r.0),
         r.1 is Peer ==> r.0 == peer,
+        // Without a Pseudo IPv4 value, `CF-Connecting-IPv6` never wins.
+        (forall|a: u32| ip_header == Some(Ip::V4(a)) ==> !spec_is_pseudo_ipv4(a))
+            ==> !(r.1 is ConnectingIpv6),
+        // The peer is used only when `CF-Connecting-IP` is missing.
+        r.1 is Peer <==> ip_header is None,
 {
-    match v6_header {
-        Some(Ip::V6(a)) => (Ip::V6(a), Source::ConnectingIpv6),
-        _ => match ip_header {
-            Some(ip) => (ip, Source::ConnectingIp),
-            None => (peer, Source::Peer),
-        },
+    match (v6_header, ip_header) {
+        (Some(Ip::V6(b)), Some(Ip::V4(a))) if (a >> 28u32) == 0xfu32 => (
+            Ip::V6(b),
+            Source::ConnectingIpv6,
+        ),
+        (_, Some(ip)) => (ip, Source::ConnectingIp),
+        (_, None) => (peer, Source::Peer),
     }
 }
 
@@ -234,33 +243,34 @@ proof fn lemma_xor_or(diff: u8, x: u8, y: u8)
     assert(((diff | (x ^ y)) == 0) <==> (diff == 0 && x == y)) by (bit_vector);
 }
 
-/// Twin of `constant_time_eq`. The loop reads all bytes. It does not stop
-/// at the first difference.
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> (r: bool)
+/// Twin of `constant_time_eq`. The loop reads `secret.len()` bytes. The
+/// time does not depend on the input length or on the first difference.
+pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: bool)
     ensures
-        r <==> a@ == b@,
+        r <==> input@ == secret@,
 {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
+    let mut diff: u8 = if input.len() == secret.len() { 0 } else { 1 };
     let mut i: usize = 0;
-    while i < a.len()
+    while i < secret.len()
         invariant
-            a.len() == b.len(),
-            i <= a.len(),
-            diff == 0 <==> (forall|j: int| 0 <= j < i ==> a@[j] == b@[j]),
-        decreases a.len() - i,
+            i <= secret.len(),
+            diff == 0 <==> (input.len() == secret.len() && forall|j: int|
+                0 <= j < i ==> input@[j] == secret@[j]),
+        decreases secret.len() - i,
     {
+        let x: u8 = if i < input.len() { input[i] } else { 0 };
         proof {
-            lemma_xor_or(diff, a@[i as int], b@[i as int]);
+            lemma_xor_or(diff, x, secret@[i as int]);
         }
-        diff = diff | (a[i] ^ b[i]);
+        diff = diff | (x ^ secret[i]);
         i = i + 1;
     }
     proof {
         if diff == 0 {
-            assert(a@ =~= b@);
+            assert(input@ =~= secret@);
+        }
+        if input@ == secret@ {
+            assert(input.len() == secret.len());
         }
     }
     diff == 0

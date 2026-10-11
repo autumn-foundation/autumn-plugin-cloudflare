@@ -11,7 +11,7 @@ use crate::ranges::{CloudflareRanges, RangeError};
 /// The time limit for one refresh request.
 const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Get the list from `url`. Replace the layer's list only when the new
+/// Gets the list from `url`. Replaces the layer's list only when the new
 /// list is safe. Returns the number of ranges.
 ///
 /// # Errors
@@ -22,6 +22,11 @@ pub async fn refresh_once(layer: &CloudflareLayer, url: &str) -> Result<usize, R
 }
 
 async fn fetch(client: &Client, layer: &CloudflareLayer, url: &str) -> Result<usize, RangeError> {
+    if !secure_url(url) {
+        return Err(RangeError::Api(
+            "the range URL must use https, or http with a loopback host".to_owned(),
+        ));
+    }
     let response = client
         .get(url)
         .no_retry()
@@ -38,7 +43,7 @@ async fn fetch(client: &Client, layer: &CloudflareLayer, url: &str) -> Result<us
     Ok(count)
 }
 
-/// Start a task that refreshes now and then at each interval. The task
+/// Starts a task that refreshes now and then at each interval. The task
 /// logs failures and continues.
 #[must_use]
 pub fn spawn_refresh(
@@ -61,4 +66,27 @@ pub fn spawn_refresh(
             }
         }
     })
+}
+
+/// Returns true when `url` uses `https`, or `http` with a loopback host
+/// (`localhost`, `127.0.0.0/8`, or `::1`). Tests use the loopback case.
+#[must_use]
+pub fn secure_url(url: &str) -> bool {
+    let Ok(uri) = url.parse::<http::Uri>() else {
+        return false;
+    };
+    let Some(host) = uri.host() else {
+        return false;
+    };
+    match uri.scheme_str() {
+        Some(s) if s.eq_ignore_ascii_case("https") => true,
+        Some(s) if s.eq_ignore_ascii_case("http") => {
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+        _ => false,
+    }
 }

@@ -295,3 +295,134 @@ async fn extractor_rejects_requests_without_cloudflare_data() {
         .expect("infallible");
     assert!(opt.is_none());
 }
+
+#[test]
+fn ip_range_new_clears_host_bits() {
+    let r = IpRange::new(ip("10.1.2.3"), 8).expect("range");
+    assert_eq!(r, "10.0.0.0/8".parse().expect("range"));
+    assert_eq!(r.to_string(), "10.0.0.0/8");
+    let r6 = IpRange::new(ip("2001:db8::1"), 32).expect("range");
+    assert_eq!(r6.to_string(), "2001:db8::/32");
+    assert_eq!(
+        IpRange::new(ip("10.0.0.1"), 0).expect("range").to_string(),
+        "0.0.0.0/0"
+    );
+    assert!(matches!(
+        IpRange::new(ip("10.0.0.1"), 33),
+        Err(RangeError::Invalid(_))
+    ));
+    assert!(matches!(
+        IpRange::new(ip("::1"), 129),
+        Err(RangeError::Invalid(_))
+    ));
+    let set: std::collections::HashSet<IpRange> = [r, "10.9.9.9/8".parse().expect("range")].into();
+    assert_eq!(set.len(), 1);
+}
+
+#[test]
+fn range_lists_have_size_limits() {
+    // Two /8 ranges cover more than one /8.
+    assert_eq!(
+        CloudflareRanges::parse(["10.0.0.0/8", "11.0.0.0/8"]),
+        Err(RangeError::TooLarge)
+    );
+    assert!(CloudflareRanges::parse(["10.0.0.0/8"]).is_ok());
+    assert_eq!(
+        CloudflareRanges::parse(["2001::/16", "2002::/16"]),
+        Err(RangeError::TooLarge)
+    );
+    let many: Vec<String> = (0..1025u32)
+        .map(|i| format!("{}/32", std::net::Ipv4Addr::from(0x0b00_0000 + i)))
+        .collect();
+    assert_eq!(CloudflareRanges::parse(&many), Err(RangeError::TooLarge));
+    assert!(CloudflareRanges::parse(&many[..1024]).is_ok());
+    assert_eq!(
+        RangeError::TooLarge.to_string(),
+        "the range list is too large"
+    );
+}
+
+#[test]
+fn api_lists_must_be_public() {
+    for bad in [
+        "10.0.0.0/8",
+        "127.0.0.0/8",
+        "192.168.1.0/24",
+        "100.64.0.0/10",
+        "169.254.0.0/16",
+        "172.16.0.0/12",
+        "0.0.0.0/8",
+    ] {
+        let body =
+            format!(r#"{{"result":{{"ipv4_cidrs":["{bad}"],"ipv6_cidrs":[]}},"success":true}}"#);
+        assert!(
+            matches!(
+                CloudflareRanges::from_api_json(body.as_bytes()),
+                Err(RangeError::NotPublic(_))
+            ),
+            "{bad}"
+        );
+    }
+    for bad in ["fd00::/16", "fe80::/16", "::ffff:0:0/96", "::1/128"] {
+        let body =
+            format!(r#"{{"result":{{"ipv4_cidrs":[],"ipv6_cidrs":["{bad}"]}},"success":true}}"#);
+        assert!(
+            matches!(
+                CloudflareRanges::from_api_json(body.as_bytes()),
+                Err(RangeError::NotPublic(_))
+            ),
+            "{bad}"
+        );
+    }
+    // A user list can hold loopback, for tests.
+    assert!(CloudflareRanges::parse(["127.0.0.0/8"]).is_ok());
+    assert!(
+        RangeError::NotPublic("10.0.0.0/8".into())
+            .to_string()
+            .contains("not public")
+    );
+}
+
+#[test]
+fn builtin_list_passes_the_api_checks() {
+    let builtin = CloudflareRanges::builtin();
+    let v4: Vec<String> = builtin
+        .ranges()
+        .iter()
+        .filter(|r| r.network().is_ipv4())
+        .map(ToString::to_string)
+        .collect();
+    let v6: Vec<String> = builtin
+        .ranges()
+        .iter()
+        .filter(|r| r.network().is_ipv6())
+        .map(ToString::to_string)
+        .collect();
+    let body = serde_json::json!({"result": {"ipv4_cidrs": v4, "ipv6_cidrs": v6}, "success": true});
+    let parsed = CloudflareRanges::from_api_json(body.to_string().as_bytes()).expect("builtin");
+    assert_eq!(parsed, builtin);
+}
+
+#[test]
+fn secure_url_allows_https_and_loopback_http() {
+    use autumn_plugin_cloudflare::__private::secure_url;
+    for ok in [
+        "https://api.cloudflare.com/client/v4/ips",
+        "HTTPS://example.com",
+        "http://127.0.0.1:8080/ips",
+        "http://localhost/ips",
+        "http://[::1]:9000/ips",
+    ] {
+        assert!(secure_url(ok), "{ok}");
+    }
+    for bad in [
+        "http://api.cloudflare.com/ips",
+        "http://10.0.0.1/ips",
+        "ftp://127.0.0.1/",
+        "/relative",
+        "",
+        "https://",
+    ] {
+        assert!(!secure_url(bad), "{bad}");
+    }
+}

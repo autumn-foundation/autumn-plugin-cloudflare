@@ -58,6 +58,44 @@ async fn verified_request_sets_peer_and_forwarded_headers_for_autumn() {
 }
 
 #[tokio::test]
+async fn verified_request_uses_the_host_header() {
+    let mut req = request(
+        EDGE,
+        &[
+            ("cf-connecting-ip", VISITOR),
+            ("x-forwarded-host", "evil.example"),
+            ("forwarded", "host=evil.example"),
+        ],
+    );
+    req.extensions_mut()
+        .get_mut::<ResolvedClientIdentity>()
+        .expect("identity")
+        .host = Some("evil.example".to_owned());
+    let (_, seen) = call(&layer(), req).await;
+    let seen = seen.expect("200");
+    assert_eq!(seen.host.as_deref(), Some("example.com"));
+    assert!(
+        !seen
+            .headers
+            .iter()
+            .any(|h| h == "x-forwarded-host" || h == "forwarded")
+    );
+}
+
+#[tokio::test]
+async fn resolved_source_without_identity_is_direct() {
+    let layer = CloudflarePlugin::new()
+        .peer_source(PeerSource::Resolved)
+        .layer();
+    for _ in 0..2 {
+        let mut req = request(EDGE, &[("cf-connecting-ip", VISITOR)]);
+        req.extensions_mut().remove::<ResolvedClientIdentity>();
+        let (_, seen) = call(&layer, req).await;
+        assert_eq!(seen.expect("200").cf_client_ip, None);
+    }
+}
+
+#[tokio::test]
 async fn direct_request_keeps_peer_and_forwarded_headers() {
     let (_, seen) = call(&layer(), request(OTHER, &[("x-forwarded-for", "6.6.6.6")])).await;
     let seen = seen.expect("200");
@@ -66,7 +104,8 @@ async fn direct_request_keeps_peer_and_forwarded_headers() {
 }
 
 #[tokio::test]
-async fn verified_request_prefers_valid_ipv6_header() {
+async fn ipv6_header_wins_only_over_a_pseudo_ipv4_value() {
+    // Pseudo IPv4 "Overwrite Headers": `CF-Connecting-IP` is Class E.
     let (_, seen) = call(
         &layer(),
         request(
@@ -79,6 +118,31 @@ async fn verified_request_prefers_valid_ipv6_header() {
     )
     .await;
     assert_eq!(seen.expect("200").addr.as_deref(), Some("2001:db8::1"));
+
+    // Without Pseudo IPv4, a Worker can set `CF-Connecting-IPv6`. The
+    // plugin ignores it.
+    for ip in [VISITOR, "2a06:98c0:3600::103"] {
+        let (_, seen) = call(
+            &layer(),
+            request(
+                EDGE,
+                &[
+                    ("cf-connecting-ip", ip),
+                    ("cf-connecting-ipv6", "2001:db8::66"),
+                ],
+            ),
+        )
+        .await;
+        assert_eq!(seen.expect("200").addr.as_deref(), Some(ip));
+    }
+
+    // No `CF-Connecting-IP`: the plugin uses the edge IP.
+    let (_, seen) = call(
+        &layer(),
+        request(EDGE, &[("cf-connecting-ipv6", "2001:db8::66")]),
+    )
+    .await;
+    assert_eq!(seen.expect("200").addr.as_deref(), Some(EDGE));
 }
 
 #[tokio::test]

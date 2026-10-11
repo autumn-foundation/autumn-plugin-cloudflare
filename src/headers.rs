@@ -30,15 +30,15 @@ fn single<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     first.to_str().ok()
 }
 
-/// Parse one IP from the header `name`. Returns `None` when the header is
+/// Parses one IP from the header `name`. Returns `None` when the header is
 /// missing, repeated, or not one valid IP.
 #[must_use]
 pub fn header_ip(headers: &HeaderMap, name: &str) -> Option<IpAddr> {
     single(headers, name)?.trim().parse().ok()
 }
 
-/// The visitor scheme from `CF-Visitor`, then `X-Forwarded-Proto`.
-/// Returns only `http` or `https`.
+/// Returns the visitor scheme from `CF-Visitor`. If that header is not
+/// valid, uses `X-Forwarded-Proto`. Returns only `http` or `https`.
 #[must_use]
 pub fn visitor_scheme(headers: &HeaderMap) -> Option<&'static str> {
     #[derive(serde::Deserialize)]
@@ -63,7 +63,7 @@ pub fn visitor_scheme(headers: &HeaderMap) -> Option<&'static str> {
     }
 }
 
-/// Remove all `cf-*` headers and `true-client-ip`.
+/// Removes all `cf-*` headers and `true-client-ip`.
 pub fn strip_cloudflare_headers(headers: &mut HeaderMap) {
     let names: Vec<_> = headers
         .keys()

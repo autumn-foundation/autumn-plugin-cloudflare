@@ -8,11 +8,11 @@ use axum::extract::{FromRequestParts, OptionalFromRequestParts};
 use http::StatusCode;
 use http::request::Parts;
 
-/// Cloudflare data for a request that came from Cloudflare.
+/// Cloudflare data for a verified request.
 ///
 /// The plugin adds it only to verified requests. Use
 /// `Option<CloudflareRequest>` for routes that also get direct requests.
-/// Without the data, the extractor returns `403 Forbidden`.
+/// For a direct request, the extractor returns `403 Forbidden`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareRequest {
     pub(crate) client_ip: IpAddr,

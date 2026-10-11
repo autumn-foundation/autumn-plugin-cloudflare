@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use autumn_plugin_cloudflare::__private::cache_from_lookup;
-use autumn_plugin_cloudflare::{ApiToken, CloudflareCache, PurgeError, PurgeReport};
+use autumn_plugin_cloudflare::{ApiToken, CloudflareCache, PurgeError};
 use axum::Router;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -109,13 +109,7 @@ fn urls(n: usize) -> Vec<String> {
 async fn urls_are_sent_in_batches_of_100() {
     let (fake, base) = fake_api().await;
     let report = cache(&base).purge_urls(urls(250)).await.expect("purge");
-    assert_eq!(
-        report,
-        PurgeReport {
-            requests: 3,
-            items: 250
-        }
-    );
+    assert_eq!((report.requests, report.items), (3, 250));
     let seen = fake.seen();
     assert_eq!(seen.len(), 3);
     let sizes: Vec<usize> = seen
@@ -144,13 +138,7 @@ async fn each_kind_has_its_own_body() {
         .await
         .expect("hosts");
     let report = c.purge_everything().await.expect("everything");
-    assert_eq!(
-        report,
-        PurgeReport {
-            requests: 1,
-            items: 0
-        }
-    );
+    assert_eq!((report.requests, report.items), (1, 0));
     let bodies: Vec<Value> = fake.seen().into_iter().map(|r| r.body).collect();
     assert_eq!(
         bodies,
@@ -170,13 +158,7 @@ async fn empty_input_sends_nothing() {
         .purge_urls(Vec::<String>::new())
         .await
         .expect("purge");
-    assert_eq!(
-        report,
-        PurgeReport {
-            requests: 0,
-            items: 0
-        }
-    );
+    assert_eq!((report.requests, report.items), (0, 0));
     assert!(fake.seen().is_empty());
 }
 
@@ -225,6 +207,7 @@ async fn rate_limit_reports_retry_after_and_progress() {
         PurgeError::RateLimited {
             retry_after,
             purged,
+            ..
         } => {
             assert_eq!(*retry_after, Some(Duration::from_secs(30)));
             assert_eq!(*purged, 100);
@@ -245,7 +228,8 @@ async fn rate_limit_without_retry_after() {
         err,
         PurgeError::RateLimited {
             retry_after: None,
-            purged: 0
+            purged: 0,
+            ..
         }
     ));
 }
@@ -264,8 +248,9 @@ async fn api_errors_carry_the_messages() {
             status,
             errors,
             purged,
+            ..
         } => {
-            assert_eq!(*status, 400);
+            assert_eq!(status.as_u16(), 400);
             assert_eq!(errors.len(), 1);
             assert_eq!(errors[0].code, 1012);
             assert!(errors[0].message.contains("purge_everything"));
@@ -284,7 +269,7 @@ async fn success_false_is_an_error() {
         .purge_hosts(["a.example"])
         .await
         .expect_err("fail");
-    assert!(matches!(err, PurgeError::Api { status: 200, .. }));
+    assert!(matches!(err, PurgeError::Api { status, .. } if status == 200));
 }
 
 #[tokio::test]
@@ -292,7 +277,7 @@ async fn bad_json_is_an_error() {
     let (fake, base) = fake_api().await;
     fake.reply(200, None, json!("not an object"));
     let err = cache(&base).purge_tags(["a"]).await.expect_err("fail");
-    assert!(matches!(err, PurgeError::Api { status: 200, .. }));
+    assert!(matches!(err, PurgeError::Api { status, .. } if status == 200));
 }
 
 #[tokio::test]
@@ -300,7 +285,7 @@ async fn server_errors_are_not_retried() {
     let (fake, base) = fake_api().await;
     fake.reply(500, None, json!({"success": false, "errors": []}));
     let err = cache(&base).purge_tags(["a"]).await.expect_err("500");
-    assert!(matches!(err, PurgeError::Api { status: 500, .. }));
+    assert!(matches!(err, PurgeError::Api { status, .. } if status == 500));
     assert_eq!(fake.seen().len(), 1);
 }
 
@@ -421,4 +406,46 @@ fn environment_lookup_builds_a_client() {
             .contains("CLOUDFLARE_ZONE_ID")
     );
     assert_eq!(PurgeError::InvalidInput("x".into()).purged(), 0);
+}
+
+#[tokio::test]
+async fn retry_after_is_capped_at_one_hour() {
+    let (fake, base) = fake_api().await;
+    fake.reply(429, Some("999999"), json!({}));
+    let err = cache(&base).purge_tags(["a"]).await.expect_err("429");
+    assert!(matches!(
+        err,
+        PurgeError::RateLimited { retry_after: Some(d), .. } if d == Duration::from_secs(3600)
+    ));
+    assert!(err.to_string().contains("3600"), "{err}");
+}
+
+#[tokio::test]
+async fn plain_http_api_base_is_rejected_for_other_hosts() {
+    for base in [
+        "http://api.example.com/client/v4",
+        "ftp://127.0.0.1/x",
+        "not a url",
+    ] {
+        let err = cache(base).purge_tags(["a"]).await.expect_err("insecure");
+        assert!(
+            matches!(err, PurgeError::InvalidInput(_)),
+            "{base}: {err:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_input_error_hides_the_item() {
+    let (_, base) = fake_api().await;
+    let err = cache(&base)
+        .purge_urls([
+            "https://example.com/ok",
+            "https://example.com/?token=secret value",
+        ])
+        .await
+        .expect_err("invalid");
+    let text = err.to_string();
+    assert!(text.contains("position 1"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
 }

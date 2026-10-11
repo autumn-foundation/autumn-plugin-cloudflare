@@ -4,6 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::task::{Context, Poll};
 
@@ -26,6 +27,8 @@ use crate::request::CloudflareRequest;
 const X_FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
 const X_FORWARDED_PROTO: HeaderName = HeaderName::from_static("x-forwarded-proto");
 const X_REAL_IP: HeaderName = HeaderName::from_static("x-real-ip");
+const X_FORWARDED_HOST: HeaderName = HeaderName::from_static("x-forwarded-host");
+const FORWARDED: HeaderName = HeaderName::from_static("forwarded");
 
 /// A shared-secret header. `Debug` hides the value.
 pub(crate) struct Secret {
@@ -34,8 +37,8 @@ pub(crate) struct Secret {
 }
 
 impl Secret {
-    /// True when the request has exactly one matching value. An empty
-    /// secret never matches.
+    /// Returns true when the request has exactly one matching value. An
+    /// empty secret never matches.
     fn matches(&self, headers: &HeaderMap) -> bool {
         let mut values = headers.get_all(&self.name).iter();
         match (values.next(), values.next()) {
@@ -64,12 +67,15 @@ pub(crate) struct Settings {
     pub(crate) lock: bool,
     pub(crate) allow: Vec<IpRange>,
     pub(crate) secret: Option<Secret>,
+    /// Set after the first warning about a missing resolved IP.
+    pub(crate) warned_no_identity: AtomicBool,
 }
 
 /// Tower layer from [`CloudflarePlugin::layer`](crate::CloudflarePlugin::layer).
 ///
 /// The plugin adds this layer for you. Use it directly only with a plain
-/// `axum` router. Clones share one range list.
+/// `axum` router. Clones share one range list. This layer does not refresh
+/// its ranges. Only the plugin starts a refresh task.
 #[derive(Clone, Debug)]
 pub struct CloudflareLayer {
     settings: Arc<Settings>,
@@ -93,7 +99,7 @@ impl CloudflareLayer {
         Arc::clone(&guard)
     }
 
-    /// Replace the range list.
+    /// Replaces the range list.
     pub(crate) fn set_ranges(&self, ranges: CloudflareRanges) {
         let mut guard = self
             .settings
@@ -110,15 +116,29 @@ impl CloudflareLayer {
                 .extensions()
                 .get::<ConnectInfo<SocketAddr>>()
                 .map(|c| c.0.ip()),
-            PeerSource::Resolved => req
-                .extensions()
-                .get::<ResolvedClientIdentity>()
-                .and_then(|id| id.addr),
+            PeerSource::Resolved => {
+                let ip = req
+                    .extensions()
+                    .get::<ResolvedClientIdentity>()
+                    .and_then(|id| id.addr);
+                if ip.is_none()
+                    && !self
+                        .settings
+                        .warned_no_identity
+                        .swap(true, Ordering::Relaxed)
+                {
+                    tracing::warn!(
+                        "cloudflare: PeerSource::Resolved found no client IP from Autumn; \
+                         check [security.trusted_proxies]"
+                    );
+                }
+                ip
+            }
         };
         ip.map(|ip| ip.to_canonical())
     }
 
-    /// Check the request and change it for the decision.
+    /// Checks the request and changes it for the decision.
     fn handle<B>(&self, req: &mut Request<B>) -> Decision {
         let settings = &self.settings;
         let peer = self.peer(req);
@@ -144,11 +164,12 @@ impl CloudflareLayer {
     }
 }
 
-/// Set the client identity from the Cloudflare headers.
+/// Sets the client identity from the Cloudflare headers.
 ///
-/// Autumn features read the client IP in two ways: from
-/// `ResolvedClientIdentity`, or again from the peer and
-/// `X-Forwarded-For`. So the function sets all three to the visitor IP.
+/// Autumn reads the client IP from `ResolvedClientIdentity`, `ConnectInfo`,
+/// or `X-Forwarded-For`. The function sets each one to the visitor IP.
+/// The host comes from `Host`, because a client can send
+/// `X-Forwarded-Host` through Cloudflare.
 fn apply_verified<B>(req: &mut Request<B>, edge: IpAddr) {
     let headers = req.headers();
     let (client, _) = choose_client_ip(
@@ -174,6 +195,7 @@ fn apply_verified<B>(req: &mut Request<B>, edge: IpAddr) {
     let extensions = req.extensions_mut();
     if let Some(id) = extensions.get_mut::<ResolvedClientIdentity>() {
         id.addr = Some(client);
+        id.host = host;
         if let Some(scheme) = scheme {
             id.scheme = Some(scheme.to_owned());
         }
@@ -192,6 +214,8 @@ fn apply_verified<B>(req: &mut Request<B>, edge: IpAddr) {
 
     let headers = req.headers_mut();
     headers.remove(X_REAL_IP);
+    headers.remove(X_FORWARDED_HOST);
+    headers.remove(FORWARDED);
     if let Ok(value) = HeaderValue::from_str(&client.to_string()) {
         headers.insert(X_FORWARDED_FOR, value);
     }

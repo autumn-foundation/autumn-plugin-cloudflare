@@ -37,6 +37,13 @@ fn example_binary() -> &'static FsPath {
     BINARY.get_or_init(|| {
         let (target_dir, profile_dir) = dirs();
         let mut cmd = Command::new(env!("CARGO"));
+        // Remove the variables that cargo set for this test. Build scripts
+        // watch some of them, so they cause a full rebuild.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("CARGO_") && key != "CARGO_HOME" {
+                cmd.env_remove(key);
+            }
+        }
         cmd.args(["build", "--quiet", "--example", "hello", "--target-dir"])
             .arg(&target_dir)
             .current_dir(env!("CARGO_MANIFEST_DIR"));
@@ -307,7 +314,7 @@ async fn fake_purge(
 async fn fake_ips(State(fake): State<FakeApi>) -> axum::Json<Value> {
     fake.ip_hits.fetch_add(1, Ordering::SeqCst);
     axum::Json(json!({
-        "result": {"ipv4_cidrs": ["127.0.0.0/8"], "ipv6_cidrs": ["::1/128"]},
+        "result": {"ipv4_cidrs": ["192.0.2.0/24"], "ipv6_cidrs": ["2001:db8::/32"]},
         "success": true, "errors": [], "messages": []
     }))
 }
@@ -348,9 +355,11 @@ async fn handler_purges_through_the_api() {
 
 #[tokio::test]
 async fn ranges_refresh_at_startup() {
+    // Loopback starts as an edge. The API list does not have loopback, so
+    // after the refresh, loopback requests are direct.
     let (fake, base) = fake_api().await;
     let app = spawn(&[
-        ("CLOUDFLARE_RANGES", "192.0.2.0/24".to_owned()),
+        loopback_is_cloudflare(),
         ("CLOUDFLARE_RANGES_URL", format!("{base}/ips")),
         ("CLOUDFLARE_REFRESH_SECS", "3600".to_owned()),
     ]);
@@ -365,7 +374,7 @@ async fn ranges_refresh_at_startup() {
             )
             .await
             .expect("reply");
-            if reply.json()["client_addr"] == "203.0.113.7" {
+            if reply.json()["client_addr"] == "127.0.0.1" {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;

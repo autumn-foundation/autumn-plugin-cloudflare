@@ -4,7 +4,9 @@ use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use crate::core::{prefix_match_v4, prefix_match_v6, range_is_safe};
+use crate::core::{
+    MAX_RANGES, MAX_V4_COVERAGE, MAX_V6_COVERAGE, prefix_match_v4, prefix_match_v6, range_is_safe,
+};
 
 /// The published list on 2026-10-11 (`GET /client/v4/ips`).
 const BUILTIN: [&str; 22] = [
@@ -32,8 +34,26 @@ const BUILTIN: [&str; 22] = [
     "2c0f:f248::/32",
 ];
 
+/// Ranges that a Cloudflare list from the API must not touch: private,
+/// loopback, link-local, shared (CGNAT), and unspecified addresses.
+const NOT_PUBLIC: [&str; 12] = [
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.168.0.0/16",
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "fc00::/7",
+    "fe80::/10",
+];
+
 /// An error in an IP range or a range list.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RangeError {
     /// The text is not a valid range.
     #[error("invalid IP range `{0}`")]
@@ -44,20 +64,48 @@ pub enum RangeError {
     /// The list has no ranges.
     #[error("the range list is empty")]
     Empty,
+    /// The list has too many ranges, or it covers too many addresses.
+    #[error("the range list is too large")]
+    TooLarge,
+    /// A range from the API touches private, loopback, or link-local
+    /// addresses.
+    #[error("IP range `{0}` is not public")]
+    NotPublic(String),
     /// The API response is not valid, or the request failed.
     #[error("invalid range list from the Cloudflare API: {0}")]
     Api(String),
 }
 
 /// An IP range in CIDR notation, for example `104.16.0.0/13`. An address
-/// with no prefix is a range of one address.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// with no prefix is a range of one address. The range clears the host
+/// bits, so `10.1.2.3/8` and `10.0.0.0/8` are equal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IpRange {
     network: IpAddr,
     prefix: u8,
 }
 
 impl IpRange {
+    /// Makes a range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `prefix` is more than 32 (IPv4) or 128 (IPv6).
+    pub fn new(addr: IpAddr, prefix: u8) -> Result<Self, RangeError> {
+        let network = match addr {
+            IpAddr::V4(a) if prefix <= 32 => {
+                let mask = u32::MAX.checked_shl(32 - u32::from(prefix)).unwrap_or(0);
+                IpAddr::V4((u32::from(a) & mask).into())
+            }
+            IpAddr::V6(a) if prefix <= 128 => {
+                let mask = u128::MAX.checked_shl(128 - u32::from(prefix)).unwrap_or(0);
+                IpAddr::V6((u128::from(a) & mask).into())
+            }
+            _ => return Err(RangeError::Invalid(format!("{addr}/{prefix}"))),
+        };
+        Ok(Self { network, prefix })
+    }
+
     /// The network address.
     #[must_use]
     pub const fn network(&self) -> IpAddr {
@@ -70,7 +118,7 @@ impl IpRange {
         self.prefix
     }
 
-    /// True when `ip` is in this range. An IPv4 range does not match an
+    /// Returns true when `ip` is in this range. An IPv4 range does not match an
     /// IPv6 address. Use [`CloudflareRanges::contains`] for IPv4-mapped
     /// IPv6 addresses.
     #[must_use]
@@ -85,6 +133,19 @@ impl IpRange {
     const fn is_safe(&self) -> bool {
         range_is_safe(self.network.is_ipv4(), self.prefix)
     }
+
+    /// The number of addresses in the range.
+    fn size(&self) -> u128 {
+        let bits = if self.network.is_ipv4() { 32 } else { 128 };
+        1u128
+            .checked_shl(bits - u32::from(self.prefix))
+            .unwrap_or(u128::MAX)
+    }
+
+    /// Returns true when the two ranges share an address.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.contains(other.network) || other.contains(self.network)
+    }
 }
 
 impl FromStr for IpRange {
@@ -98,15 +159,12 @@ impl FromStr for IpRange {
             None => (text, None),
         };
         let network: IpAddr = addr.parse().map_err(|_| invalid())?;
-        let max = if network.is_ipv4() { 32 } else { 128 };
         let prefix = match prefix {
             Some(p) => p.parse::<u8>().map_err(|_| invalid())?,
-            None => max,
+            None if network.is_ipv4() => 32,
+            None => 128,
         };
-        if prefix > max {
-            return Err(invalid());
-        }
-        Ok(Self { network, prefix })
+        Self::new(network, prefix).map_err(|_| invalid())
     }
 }
 
@@ -116,8 +174,12 @@ impl fmt::Display for IpRange {
     }
 }
 
-/// A list of Cloudflare edge ranges. The list is never empty. No range is
-/// broader than `/8` (IPv4) or `/16` (IPv6).
+/// A list of Cloudflare edge ranges.
+///
+/// The list is never empty. It has 1,024 ranges or fewer. No range is
+/// broader than `/8` (IPv4) or `/16` (IPv6). All IPv4 ranges together
+/// cover one `/8` or less. All IPv6 ranges together cover one `/16` or
+/// less.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudflareRanges {
     ranges: Vec<IpRange>,
@@ -131,12 +193,12 @@ impl CloudflareRanges {
         Self { ranges }
     }
 
-    /// A list from range strings.
+    /// Makes a list from range strings.
     ///
     /// # Errors
     ///
-    /// Returns an error for an empty list, a bad range, or a range that is
-    /// too broad.
+    /// Returns an error for an empty list, a bad range, a range that is
+    /// too broad, or a list that is too large.
     pub fn parse<I, S>(ranges: I) -> Result<Self, RangeError>
     where
         I: IntoIterator<Item = S>,
@@ -148,15 +210,33 @@ impl CloudflareRanges {
             if !range.is_safe() {
                 return Err(RangeError::TooBroad(range.to_string()));
             }
+            if list.len() == MAX_RANGES {
+                return Err(RangeError::TooLarge);
+            }
             list.push(range);
         }
         if list.is_empty() {
             return Err(RangeError::Empty);
         }
+        let (mut v4, mut v6) = (0u128, 0u128);
+        for range in &list {
+            let total = if range.network.is_ipv4() {
+                &mut v4
+            } else {
+                &mut v6
+            };
+            *total = total.saturating_add(range.size());
+        }
+        if v4 > MAX_V4_COVERAGE || v6 > MAX_V6_COVERAGE {
+            return Err(RangeError::TooLarge);
+        }
         Ok(Self { ranges: list })
     }
 
-    /// A list from the body of `GET /client/v4/ips`.
+    /// Makes a list from the body of `GET /client/v4/ips`.
+    ///
+    /// The function also rejects ranges that touch private, loopback,
+    /// link-local, or shared (CGNAT) addresses.
     ///
     /// # Errors
     ///
@@ -184,7 +264,16 @@ impl CloudflareRanges {
         else {
             return Err(RangeError::Api("the API did not return success".to_owned()));
         };
-        Self::parse(lists.ipv4_cidrs.iter().chain(&lists.ipv6_cidrs))
+        let ranges = Self::parse(lists.ipv4_cidrs.iter().chain(&lists.ipv6_cidrs))?;
+        let blocked: Vec<IpRange> = NOT_PUBLIC.iter().filter_map(|r| r.parse().ok()).collect();
+        if let Some(bad) = ranges
+            .ranges
+            .iter()
+            .find(|r| blocked.iter().any(|b| b.overlaps(r)))
+        {
+            return Err(RangeError::NotPublic(bad.to_string()));
+        }
+        Ok(ranges)
     }
 
     /// The ranges.
@@ -193,7 +282,7 @@ impl CloudflareRanges {
         &self.ranges
     }
 
-    /// True when `ip` is in a range. An IPv4-mapped IPv6 address
+    /// Returns true when `ip` is in a range. An IPv4-mapped IPv6 address
     /// (`::ffff:a.b.c.d`) is checked as IPv4.
     #[must_use]
     pub fn contains(&self, ip: IpAddr) -> bool {
@@ -201,7 +290,7 @@ impl CloudflareRanges {
     }
 }
 
-/// True when `ip` is in one of `ranges`. Checks IPv4-mapped addresses as
+/// Returns true when `ip` is in one of `ranges`. Checks IPv4-mapped addresses as
 /// IPv4.
 pub(crate) fn any_contains(ranges: &[IpRange], ip: IpAddr) -> bool {
     let ip = ip.to_canonical();
