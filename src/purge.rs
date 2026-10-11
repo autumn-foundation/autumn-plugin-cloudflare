@@ -1,6 +1,7 @@
 //! Cloudflare cache purge client.
 
 use std::fmt;
+use std::future::{Future, ready};
 use std::time::Duration;
 
 use autumn_web::AppState;
@@ -398,17 +399,19 @@ fn valid_host(host: &str) -> bool {
 impl FromRequestParts<AppState> for CloudflareCache {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(
+    fn from_request_parts(
         _parts: &mut Parts,
         state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        state
-            .extension::<Self>()
-            .map(|cache| (*cache).clone())
-            .ok_or((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "the Cloudflare cache client is not configured",
-            ))
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(
+            state
+                .extension::<Self>()
+                .map(|cache| (*cache).clone())
+                .ok_or((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the Cloudflare cache client is not configured",
+                )),
+        )
     }
 }
 

@@ -1,6 +1,7 @@
 //! The `CloudflareRequest` extractor.
 
 use std::convert::Infallible;
+use std::future::{Future, ready};
 use std::net::IpAddr;
 
 use axum::extract::{FromRequestParts, OptionalFromRequestParts};
@@ -64,21 +65,24 @@ impl CloudflareRequest {
 impl<S: Send + Sync> FromRequestParts<S> for CloudflareRequest {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        parts.extensions.get::<Self>().cloned().ok_or((
+    fn from_request_parts(
+        parts: &mut Parts,
+        _state: &S,
+    ) -> impl Future<Output = Result<Self, Self::Rejection>> + Send {
+        ready(parts.extensions.get::<Self>().cloned().ok_or((
             StatusCode::FORBIDDEN,
             "the request did not come through Cloudflare",
-        ))
+        )))
     }
 }
 
 impl<S: Send + Sync> OptionalFromRequestParts<S> for CloudflareRequest {
     type Rejection = Infallible;
 
-    async fn from_request_parts(
+    fn from_request_parts(
         parts: &mut Parts,
         _state: &S,
-    ) -> Result<Option<Self>, Self::Rejection> {
-        Ok(parts.extensions.get::<Self>().cloned())
+    ) -> impl Future<Output = Result<Option<Self>, Self::Rejection>> + Send {
+        ready(Ok(parts.extensions.get::<Self>().cloned()))
     }
 }

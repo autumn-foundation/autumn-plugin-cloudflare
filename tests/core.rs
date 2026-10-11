@@ -147,7 +147,7 @@ fn range_errors_have_text() {
             .to_string()
             .contains("0.0.0.0/0")
     );
-    assert!(!RangeError::Empty.to_string().is_empty());
+    assert_eq!(RangeError::Empty.to_string(), "the range list is empty");
 }
 
 // --- Header helpers ---------------------------------------------------------
@@ -270,7 +270,10 @@ fn cache_tag_header_has_a_size_limit() {
     let mut tags = vec!["a".repeat(1024); 15];
     tags.push("b".repeat(16384 - 15 * 1024 - 15));
     assert!(CacheTags::new(&tags).is_ok());
-    assert!(!CacheTagError::TooLong.to_string().is_empty());
+    assert_eq!(
+        CacheTagError::TooLong.to_string(),
+        "the Cache-Tag header value is longer than 16 KB"
+    );
 }
 
 // --- AC5: extractor ---------------------------------------------------------
