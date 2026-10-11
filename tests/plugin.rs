@@ -55,3 +55,12 @@ fn all_options_build() {
     );
     assert_eq!(layer_count(&app), 1);
 }
+
+#[test]
+fn default_and_clone_match_new() {
+    let a = format!("{:?}", CloudflarePlugin::default());
+    let plugin = CloudflarePlugin::new().lock_origin(true);
+    let copy = plugin.clone();
+    assert_eq!(format!("{plugin:?}"), format!("{copy:?}"));
+    assert_eq!(a, format!("{:?}", CloudflarePlugin::new()));
+}

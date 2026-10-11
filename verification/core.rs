@@ -67,6 +67,49 @@ pub proof fn lemma_match_v4_monotonic(network: u32, p: u8, q: u8, addr: u32)
     }
 }
 
+/// A match means that each of the top `p` bits is equal. This is an
+/// independent statement of the range rule.
+pub proof fn lemma_match_v4_bits(network: u32, p: u8, addr: u32, i: u32)
+    requires
+        spec_match_v4(network, p, addr),
+        1 <= p <= 32,
+        i < p as u32,
+    ensures
+        ((network >> ((31 - i) as u32)) & 1u32) == ((addr >> ((31 - i) as u32)) & 1u32),
+{
+    let s: u32 = (32 - p) as u32;
+    let t: u32 = (31 - i) as u32;
+    assert(s <= t && t < 32);
+    assert((network >> s) == (addr >> s) && s <= t && t < 32 ==> ((network >> t) & 1u32) == ((
+    addr >> t) & 1u32)) by (bit_vector);
+}
+
+/// A match is the same as "the XOR of the two addresses has no bit in the
+/// prefix".
+pub proof fn lemma_match_v4_xor(network: u32, p: u8, addr: u32)
+    requires
+        1 <= p <= 32,
+    ensures
+        spec_match_v4(network, p, addr) <==> ((network ^ addr) >> ((32 - p) as u32)) == 0,
+{
+    let s: u32 = (32 - p) as u32;
+    assert(s < 32 ==> (((network >> s) == (addr >> s)) <==> (((network ^ addr) >> s) == 0)))
+        by (bit_vector);
+}
+
+/// A safe IPv4 range never matches all addresses: the address with the
+/// top bit flipped is outside.
+pub proof fn lemma_safe_v4_is_not_all(network: u32, p: u8)
+    requires
+        spec_range_is_safe(true, p),
+    ensures
+        !spec_match_v4(network, p, network ^ 0x8000_0000u32),
+{
+    let s: u32 = (32 - p) as u32;
+    assert(s <= 24);
+    assert(s <= 24 ==> (network >> s) != ((network ^ 0x8000_0000u32) >> s)) by (bit_vector);
+}
+
 /// Spec for IPv6.
 pub open spec fn spec_match_v6(network: u128, prefix: u8, addr: u128) -> bool {
     if prefix == 0 {
@@ -100,6 +143,49 @@ pub fn prefix_match_v6(network: u128, prefix: u8, addr: u128) -> (r: bool)
     }
 }
 
+/// Two shifts are one shift by the sum.
+#[verifier::rlimit(400)]
+proof fn lemma_shr_compose_v6(x: u128, a: u128, b: u128)
+    requires
+        a + b < 128,
+    ensures
+        (x >> (a + b) as u128) == ((x >> a) >> b),
+{
+    assert(a + b < 128 ==> (x >> (a + b) as u128) == ((x >> a) >> b)) by (bit_vector);
+}
+
+/// A shorter prefix keeps an IPv6 match.
+pub proof fn lemma_match_v6_monotonic(network: u128, p: u8, q: u8, addr: u128)
+    requires
+        spec_match_v6(network, p, addr),
+        q <= p,
+        p <= 128,
+    ensures
+        spec_match_v6(network, q, addr),
+{
+    if q != 0 {
+        let s1: u128 = (128 - p) as u128;
+        let s2: u128 = (128 - q) as u128;
+        let d: u128 = (s2 - s1) as u128;
+        assert(s1 <= s2 && s2 < 128 && d < 128);
+        lemma_shr_compose_v6(network, s1, d);
+        lemma_shr_compose_v6(addr, s1, d);
+    }
+}
+
+/// A safe IPv6 range never matches all addresses.
+pub proof fn lemma_safe_v6_is_not_all(network: u128, p: u8)
+    requires
+        spec_range_is_safe(false, p),
+    ensures
+        !spec_match_v6(network, p, network ^ 0x8000_0000_0000_0000_0000_0000_0000_0000u128),
+{
+    let s: u128 = (128 - p) as u128;
+    assert(s <= 112);
+    assert(s <= 112 ==> (network >> s) != ((network ^ 0x8000_0000_0000_0000_0000_0000_0000_0000u128)
+        >> s)) by (bit_vector);
+}
+
 // ---------------------------------------------------------------------------
 // Range list safety (twin: `src/core.rs::range_is_safe`)
 // ---------------------------------------------------------------------------
@@ -131,6 +217,65 @@ pub fn range_is_safe(is_v4: bool, prefix: u8) -> (r: bool)
     } else {
         MIN_V6_PREFIX <= prefix && prefix <= 128
     }
+}
+
+// ---------------------------------------------------------------------------
+// Range list coverage (twin: `src/core.rs::coverage_within`)
+// ---------------------------------------------------------------------------
+
+/// Spec: the sum of the range sizes.
+pub open spec fn spec_sum(sizes: Seq<u128>) -> int
+    decreases sizes.len(),
+{
+    if sizes.len() == 0 {
+        0
+    } else {
+        spec_sum(sizes.drop_last()) + sizes.last() as int
+    }
+}
+
+proof fn lemma_sum_prefix(sizes: Seq<u128>, k: int)
+    requires
+        0 <= k <= sizes.len(),
+    ensures
+        spec_sum(sizes) >= spec_sum(sizes.subrange(0, k)),
+    decreases sizes.len() - k,
+{
+    if k < sizes.len() {
+        lemma_sum_prefix(sizes, k + 1);
+        assert(sizes.subrange(0, k + 1).drop_last() =~= sizes.subrange(0, k));
+    } else {
+        assert(sizes.subrange(0, k) =~= sizes);
+    }
+}
+
+/// Twin of `coverage_within`. True when the ranges cover `max` addresses
+/// or fewer.
+pub fn coverage_within(sizes: &[u128], max: u128) -> (r: bool)
+    ensures
+        r <==> spec_sum(sizes@) <= max as int,
+{
+    let mut total: u128 = 0;
+    let mut i: usize = 0;
+    while i < sizes.len()
+        invariant
+            i <= sizes.len(),
+            total as int == spec_sum(sizes@.subrange(0, i as int)),
+            total <= max,
+        decreases sizes.len() - i,
+    {
+        assert(sizes@.subrange(0, i as int + 1).drop_last() =~= sizes@.subrange(0, i as int));
+        if sizes[i] > max - total {
+            proof {
+                lemma_sum_prefix(sizes@, i as int + 1);
+            }
+            return false;
+        }
+        total = total + sizes[i];
+        i = i + 1;
+    }
+    assert(sizes@.subrange(0, sizes.len() as int) =~= sizes@);
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +362,7 @@ pub fn choose_client_ip(v6_header: Option<Ip>, ip_header: Option<Ip>, peer: Ip) 
         r.1 is ConnectingIp ==> ip_header == Some(r.0),
         r.1 is Peer ==> r.0 == peer,
         // Without a Pseudo IPv4 value, `CF-Connecting-IPv6` never wins.
-        (forall|a: u32| ip_header == Some(Ip::V4(a)) ==> !spec_is_pseudo_ipv4(a))
+        (forall|a: u32| #![auto] ip_header == Some(Ip::V4(a)) ==> !spec_is_pseudo_ipv4(a))
             ==> !(r.1 is ConnectingIpv6),
         // The peer is used only when `CF-Connecting-IP` is missing.
         r.1 is Peer <==> ip_header is None,
@@ -245,10 +390,13 @@ proof fn lemma_xor_or(diff: u8, x: u8, y: u8)
 
 /// Twin of `constant_time_eq`. The loop reads `secret.len()` bytes. The
 /// time does not depend on the input length or on the first difference.
-pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: bool)
+pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: (bool, Ghost<nat>))
     ensures
-        r <==> input@ == secret@,
+        r.0 <==> input@ == secret@,
+        // The loop makes exactly `secret.len()` steps for every input.
+        r.1@ == secret.len(),
 {
+    let ghost mut steps: nat = 0;
     let mut diff: u8 = if input.len() == secret.len() { 0 } else { 1 };
     let mut i: usize = 0;
     while i < secret.len()
@@ -256,6 +404,7 @@ pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: bool)
             i <= secret.len(),
             diff == 0 <==> (input.len() == secret.len() && forall|j: int|
                 0 <= j < i ==> input@[j] == secret@[j]),
+            steps == i,
         decreases secret.len() - i,
     {
         let x: u8 = if i < input.len() { input[i] } else { 0 };
@@ -264,6 +413,9 @@ pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: bool)
         }
         diff = diff | (x ^ secret[i]);
         i = i + 1;
+        proof {
+            steps = steps + 1;
+        }
     }
     proof {
         if diff == 0 {
@@ -273,7 +425,7 @@ pub fn constant_time_eq(input: &[u8], secret: &[u8]) -> (r: bool)
             assert(input.len() == secret.len());
         }
     }
-    diff == 0
+    (diff == 0, Ghost(steps))
 }
 
 // ---------------------------------------------------------------------------

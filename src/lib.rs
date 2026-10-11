@@ -60,8 +60,8 @@ pub mod __private {
     pub use crate::core::{
         ClientIpSource, Decision, MAX_BATCH, MAX_HEADER_LEN, MAX_RANGES, MAX_TAG_LEN,
         MAX_V4_COVERAGE, MAX_V6_COVERAGE, MIN_V4_PREFIX, MIN_V6_PREFIX, batch_count,
-        choose_client_ip, constant_time_eq, decide, is_pseudo_ipv4, prefix_match_v4,
-        prefix_match_v6, range_is_safe, tags_header_len, valid_tag,
+        choose_client_ip, constant_time_eq, coverage_within, decide, is_pseudo_ipv4,
+        prefix_match_v4, prefix_match_v6, range_is_safe, tags_header_len, valid_tag,
     };
     pub use crate::headers::{header_ip, strip_cloudflare_headers, visitor_scheme};
     pub use crate::purge::cache_from_lookup;

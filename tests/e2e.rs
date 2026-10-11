@@ -166,7 +166,10 @@ async fn send(app: &App, method: &str, path: &str, headers: &[(&str, &str)]) -> 
 async fn ready(app: &App, headers: &[(&str, &str)]) {
     let wait = tokio::time::timeout(WAIT, async {
         loop {
-            if send(app, "GET", "/posts/0", headers).await.is_some() {
+            // Check the body, so a different server on the port does not count.
+            if let Some(reply) = send(app, "GET", "/posts/0", headers).await
+                && (reply.body == "post 0" || reply.status == 403)
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

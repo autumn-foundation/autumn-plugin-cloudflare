@@ -80,10 +80,20 @@ async fn purge(
     res
 }
 
+async fn steal(State(fake): State<Fake>) -> StatusCode {
+    fake.seen.lock().expect("lock").push(Recorded {
+        zone: "STOLEN".to_owned(),
+        auth: None,
+        body: Value::Null,
+    });
+    StatusCode::OK
+}
+
 async fn fake_api() -> (Fake, String) {
     let fake = Fake::default();
     let router = Router::new()
         .route("/client/v4/zones/{zone}/purge_cache", post(purge))
+        .route("/steal", post(steal).get(steal))
         .with_state(fake.clone());
     let addr = common::serve(router).await;
     (fake, format!("http://{addr}/client/v4"))
@@ -448,4 +458,63 @@ async fn invalid_input_error_hides_the_item() {
     let text = err.to_string();
     assert!(text.contains("position 1"), "{text}");
     assert!(!text.contains("secret"), "{text}");
+}
+
+#[tokio::test]
+async fn redirects_are_not_followed() {
+    let (fake, base) = fake_api_redirect().await;
+    let err = cache(&base).purge_tags(["a"]).await.expect_err("redirect");
+    assert!(
+        matches!(&err, PurgeError::Api { status, .. } if *status == 307),
+        "{err:?}"
+    );
+    let seen = fake.seen();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen.iter().all(|r| r.zone != "STOLEN"));
+}
+
+async fn redirect(State(fake): State<Fake>, Path(zone): Path<String>) -> axum::response::Response {
+    fake.seen.lock().expect("lock").push(Recorded {
+        zone,
+        auth: None,
+        body: Value::Null,
+    });
+    (StatusCode::TEMPORARY_REDIRECT, [("location", "/steal")]).into_response()
+}
+
+async fn fake_api_redirect() -> (Fake, String) {
+    let fake = Fake::default();
+    let router = Router::new()
+        .route("/client/v4/zones/{zone}/purge_cache", post(redirect))
+        .route("/steal", post(steal).get(steal))
+        .with_state(fake.clone());
+    let addr = common::serve(router).await;
+    (fake, format!("http://{addr}/client/v4"))
+}
+
+#[tokio::test]
+async fn api_error_after_a_batch_reports_progress() {
+    let (fake, base) = fake_api().await;
+    fake.reply(200, None, json!({"success": true, "errors": []}));
+    fake.reply(400, None, json!({"success": false, "errors": []}));
+    let err = cache(&base).purge_urls(urls(150)).await.expect_err("400");
+    assert!(
+        matches!(err, PurgeError::Api { purged: 100, .. }),
+        "{err:?}"
+    );
+    assert_eq!(err.purged(), 100);
+}
+
+#[tokio::test]
+async fn http_and_https_urls_are_accepted() {
+    let (fake, base) = fake_api().await;
+    cache(&base)
+        .purge_urls(["http://example.com/a", "HTTPS://example.com/b"])
+        .await
+        .expect("purge");
+    assert_eq!(fake.seen().len(), 1);
+    for bad in ["http:///x", "https:///x", "http://"] {
+        let err = cache(&base).purge_urls([bad]).await.expect_err("invalid");
+        assert!(matches!(err, PurgeError::InvalidInput(_)), "{bad}");
+    }
 }

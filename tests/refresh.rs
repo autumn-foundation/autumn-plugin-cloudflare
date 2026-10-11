@@ -143,3 +143,44 @@ async fn plain_http_range_url_is_rejected_for_other_hosts() {
     assert!(matches!(err, RangeError::Api(_)));
     assert_eq!(*layer.current_ranges(), CloudflareRanges::builtin());
 }
+
+#[tokio::test]
+async fn failure_keeps_the_last_refreshed_list() {
+    let (_, good) = fake_api(200, good_body()).await;
+    let layer = CloudflarePlugin::new().layer();
+    assert_eq!(refresh_once(&layer, &good).await, Ok(2));
+    let refreshed = layer.current_ranges();
+    assert_ne!(*refreshed, CloudflareRanges::builtin());
+    let (_, bad) = fake_api(503, json!({})).await;
+    assert!(refresh_once(&layer, &bad).await.is_err());
+    assert_eq!(layer.current_ranges(), refreshed);
+}
+
+async fn redirect_to_ips() -> (StatusCode, [(&'static str, &'static str); 1]) {
+    (
+        StatusCode::TEMPORARY_REDIRECT,
+        [("location", "/client/v4/ips")],
+    )
+}
+
+#[tokio::test]
+async fn refresh_does_not_follow_redirects() {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let fake = Fake {
+        hits: Arc::clone(&hits),
+        status: 200,
+        body: good_body(),
+    };
+    let router = Router::new()
+        .route("/moved", get(redirect_to_ips))
+        .route("/client/v4/ips", get(ips))
+        .with_state(fake);
+    let addr = common::serve(router).await;
+    let layer = CloudflarePlugin::new().layer();
+    let err = refresh_once(&layer, &format!("http://{addr}/moved"))
+        .await
+        .expect_err("redirect");
+    assert!(matches!(err, RangeError::Api(_)));
+    assert_eq!(hits.load(Ordering::SeqCst), 0);
+    assert_eq!(*layer.current_ranges(), CloudflareRanges::builtin());
+}

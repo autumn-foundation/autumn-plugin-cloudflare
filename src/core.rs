@@ -159,6 +159,20 @@ pub fn tags_header_len(lens: &[usize]) -> Option<usize> {
     Some(total)
 }
 
+/// Returns true when the sizes add up to `max` or less. The sum does not
+/// overflow.
+#[must_use]
+pub fn coverage_within(sizes: &[u128], max: u128) -> bool {
+    let mut total: u128 = 0;
+    for &size in sizes {
+        if size > max - total {
+            return false;
+        }
+        total += size;
+    }
+    true
+}
+
 /// Returns the number of batches of `size` items for `n` items. `size` must be 1
 /// or more.
 #[must_use]

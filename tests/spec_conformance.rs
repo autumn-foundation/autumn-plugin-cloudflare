@@ -7,8 +7,8 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use autumn_plugin_cloudflare::__private::{
     ClientIpSource, Decision, MAX_BATCH, MAX_HEADER_LEN, MAX_RANGES, MAX_TAG_LEN, MAX_V4_COVERAGE,
     MAX_V6_COVERAGE, MIN_V4_PREFIX, MIN_V6_PREFIX, batch_count, choose_client_ip, constant_time_eq,
-    decide, is_pseudo_ipv4, prefix_match_v4, prefix_match_v6, range_is_safe, tags_header_len,
-    valid_tag,
+    coverage_within, decide, is_pseudo_ipv4, prefix_match_v4, prefix_match_v6, range_is_safe,
+    tags_header_len, valid_tag,
 };
 use autumn_plugin_cloudflare::{CloudflareRanges, IpRange, RangeError};
 use proptest::prelude::*;
@@ -58,35 +58,71 @@ proptest! {
     }
 
     #[test]
-    fn ip_range_uses_the_twin(n: u32, a: u32, p in 0u8..=32) {
+    fn ip_range_agrees_with_bits(n: u32, a: u32, p in 0u8..=32) {
         let range: IpRange = format!("{}/{p}", Ipv4Addr::from(n)).parse().expect("range");
-        prop_assert_eq!(range.contains(IpAddr::V4(Ipv4Addr::from(a))), prefix_match_v4(n, p, a));
+        prop_assert_eq!(
+            range.contains(IpAddr::V4(Ipv4Addr::from(a))),
+            naive_match(u128::from(n), u128::from(a), u32::from(p), 32)
+        );
     }
 
     #[test]
-    fn ip_range_v6_uses_the_twin(n: u128, a: u128, p in 0u8..=128) {
+    fn ip_range_v6_agrees_with_bits(n: u128, a: u128, p in 0u8..=128) {
         let range: IpRange = format!("{}/{p}", Ipv6Addr::from(n)).parse().expect("range");
-        prop_assert_eq!(range.contains(IpAddr::V6(Ipv6Addr::from(a))), prefix_match_v6(n, p, a));
+        prop_assert_eq!(
+            range.contains(IpAddr::V6(Ipv6Addr::from(a))),
+            naive_match(n, a, u32::from(p), 128)
+        );
     }
 
     #[test]
-    fn range_safety_agrees_with_spec(is_v4: bool, p: u8) {
-        let spec = if is_v4 {
-            (MIN_V4_PREFIX..=32).contains(&p)
+    fn v6_match_near_network(n: u128, flip in 0u32..128, p in prop_oneof![Just(0u8), Just(1), Just(64), Just(127), Just(128), 0u8..=128]) {
+        let a = n ^ (1u128 << flip);
+        let in_prefix = 127 - flip < u32::from(p);
+        prop_assert_eq!(prefix_match_v6(n, p, a), !in_prefix);
+        prop_assert_eq!(prefix_match_v6(n, p, n), true);
+    }
+
+    #[test]
+    fn safe_ranges_never_match_everything(n: u32, n6: u128, p: u8) {
+        // Property: a safe range leaves out the address with the top bit
+        // flipped. An unsafe prefix is 0, too broad, or too long.
+        if range_is_safe(true, p) {
+            prop_assert!(!prefix_match_v4(n, p, n ^ 0x8000_0000));
         } else {
-            (MIN_V6_PREFIX..=128).contains(&p)
-        };
-        prop_assert_eq!(range_is_safe(is_v4, p), spec);
+            prop_assert!(!(MIN_V4_PREFIX..=32).contains(&p));
+        }
+        if range_is_safe(false, p) {
+            prop_assert!(!prefix_match_v6(n6, p, n6 ^ (1 << 127)));
+        } else {
+            prop_assert!(!(MIN_V6_PREFIX..=128).contains(&p));
+        }
     }
 
     #[test]
     fn choose_agrees_with_spec(v6 in proptest::option::of(any::<IpAddr>()), ip in proptest::option::of(ip_strategy()), peer: IpAddr) {
         let (got, source) = choose_client_ip(v6, ip, peer);
-        let pseudo = matches!(ip, Some(IpAddr::V4(a)) if u32::from(a) >= 0xf000_0000);
-        match (v6, ip) {
-            (Some(a @ IpAddr::V6(_)), Some(_)) if pseudo => prop_assert_eq!((got, source), (a, ClientIpSource::ConnectingIpv6)),
-            (_, Some(b)) => prop_assert_eq!((got, source), (b, ClientIpSource::ConnectingIp)),
-            (_, None) => prop_assert_eq!((got, source), (peer, ClientIpSource::Peer)),
+        // Properties, not a copy of the code:
+        // - the result is the value of the source that it names;
+        // - the peer only when `CF-Connecting-IP` is missing;
+        // - the IPv6 header only over a Class E value, and only as IPv6.
+        match source {
+            ClientIpSource::Peer => prop_assert!(ip.is_none() && got == peer),
+            ClientIpSource::ConnectingIp => prop_assert_eq!(Some(got), ip),
+            ClientIpSource::ConnectingIpv6 => {
+                prop_assert_eq!(Some(got), v6);
+                prop_assert!(got.is_ipv6());
+                let class_e = matches!(ip, Some(IpAddr::V4(a)) if a.octets()[0] >= 240);
+                prop_assert!(class_e);
+            }
+        }
+        if ip.is_some() {
+            prop_assert!(source != ClientIpSource::Peer);
+        }
+        if let (Some(IpAddr::V6(_)), Some(IpAddr::V4(a))) = (v6, ip)
+            && a.octets()[0] >= 240
+        {
+            prop_assert_eq!(source, ClientIpSource::ConnectingIpv6);
         }
     }
 
@@ -138,7 +174,41 @@ proptest! {
     }
 
     #[test]
-    fn header_len_agrees_with_spec(lens in proptest::collection::vec(0usize..3000, 0..30)) {
+    fn constant_time_eq_finds_one_changed_byte(a in proptest::collection::vec(any::<u8>(), 1..40), index: proptest::sample::Index, flip in 1u8..=255) {
+        let mut b = a.clone();
+        let i = index.index(b.len());
+        b[i] ^= flip;
+        prop_assert!(!constant_time_eq(&a, &b));
+    }
+
+    #[test]
+    fn header_len_at_the_limit(k in 1usize..20, zeros in 0usize..3, delta in prop_oneof![Just(-1i64), Just(0), Just(1)]) {
+        // Lengths that sum (with commas) to MAX - 1, MAX, or MAX + 1.
+        let mut lens = vec![0usize; zeros];
+        lens.extend(vec![1usize; k - 1]);
+        let commas = lens.len() + 1 - 1;
+        let used: usize = lens.iter().sum::<usize>() + commas;
+        let target = i64::try_from(MAX_HEADER_LEN).expect("fits") + delta;
+        let last = usize::try_from(target - i64::try_from(used).expect("fits")).expect("non-negative");
+        lens.push(last);
+        let spec: usize = lens.iter().sum::<usize>() + lens.len() - 1;
+        prop_assert_eq!(i64::try_from(spec).expect("fits"), target);
+        let got = tags_header_len(&lens);
+        if delta <= 0 {
+            prop_assert_eq!(got, Some(spec));
+        } else {
+            prop_assert_eq!(got, None);
+        }
+    }
+
+    #[test]
+    fn coverage_within_agrees_with_spec(sizes in proptest::collection::vec(prop_oneof![0u128..10, any::<u128>()], 0..8), max: u128) {
+        let spec = sizes.iter().try_fold(0u128, |acc, s| acc.checked_add(*s)).is_some_and(|t| t <= max);
+        prop_assert_eq!(coverage_within(&sizes, max), spec);
+    }
+
+    #[test]
+    fn header_len_agrees_with_spec(lens in proptest::collection::vec(prop_oneof![Just(0usize), 0usize..3000], 0..30)) {
         let spec: usize = lens.iter().sum::<usize>() + lens.len().saturating_sub(1);
         let got = tags_header_len(&lens);
         if spec <= MAX_HEADER_LEN {
@@ -158,18 +228,19 @@ proptest! {
 }
 
 #[test]
-fn decide_agrees_with_spec_for_all_inputs() {
+fn decide_has_the_proved_properties_for_all_inputs() {
     for bits in 0..16u8 {
         let (edge, secret, allowed, lock) =
             (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
-        let spec = if edge && secret {
-            Decision::Verified
-        } else if lock && !allowed {
-            Decision::Reject
-        } else {
-            Decision::Direct
-        };
-        assert_eq!(decide(edge, secret, allowed, lock), spec, "{bits:04b}");
+        let d = decide(edge, secret, allowed, lock);
+        // The same properties as the Verus `ensures` clauses.
+        assert_eq!(d == Decision::Verified, edge && secret, "{bits:04b}");
+        if !lock || allowed {
+            assert_ne!(d, Decision::Reject, "{bits:04b}");
+        }
+        if lock && !allowed && !(edge && secret) {
+            assert_eq!(d, Decision::Reject, "{bits:04b}");
+        }
     }
 }
 

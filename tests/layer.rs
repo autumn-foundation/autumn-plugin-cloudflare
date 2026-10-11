@@ -162,6 +162,19 @@ async fn ipv4_value_in_ipv6_header_is_ignored() {
 }
 
 #[tokio::test]
+async fn ipv4_mapped_visitor_ip_is_ipv4() {
+    let (_, seen) = call(
+        &layer(),
+        request(EDGE, &[("cf-connecting-ip", "::ffff:203.0.113.7")]),
+    )
+    .await;
+    let seen = seen.expect("200");
+    assert_eq!(seen.addr.as_deref(), Some(VISITOR));
+    assert_eq!(seen.forwarded_for.as_deref(), Some(VISITOR));
+    assert_eq!(seen.connect_ip.as_deref(), Some(VISITOR));
+}
+
+#[tokio::test]
 async fn bad_or_missing_header_falls_back_to_the_peer() {
     for headers in [&[("cf-connecting-ip", "not-an-ip")][..], &[][..]] {
         let (_, seen) = call(&layer(), request(EDGE, headers)).await;

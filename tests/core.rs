@@ -64,6 +64,8 @@ fn ip_range_parses_and_displays() {
     assert_eq!(single.prefix(), 32);
     assert!(single.contains(ip("10.0.0.1")));
     assert!(!single.contains(ip("10.0.0.2")));
+    let one6: IpRange = "2001:db8::1".parse().expect("range");
+    assert_eq!(one6.prefix(), 128);
     let v6: IpRange = "2001:db8::/32".parse().expect("range");
     assert!(v6.contains(ip("2001:db8:1::1")));
     assert!(!v6.contains(ip("10.0.0.1")));

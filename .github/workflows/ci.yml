@@ -48,11 +48,12 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - name: Download Verus
+      - name: Download Verus (pinned)
         env:
           GH_TOKEN: ${{ github.token }}
+          VERUS_RELEASE: release/rolling/0.2026.10.10.924be81
         run: |
-          gh release download --repo verus-lang/verus --pattern '*x86-linux.zip' --dir "$RUNNER_TEMP"
+          gh release download "$VERUS_RELEASE" --repo verus-lang/verus --pattern '*x86-linux.zip' --dir "$RUNNER_TEMP"
           unzip -q "$RUNNER_TEMP"/*x86-linux.zip -d "$RUNNER_TEMP/verus"
           VERUS="$(find "$RUNNER_TEMP/verus" -type f -name verus -perm -u+x | head -n1)"
           echo "VERUS=$VERUS" >> "$GITHUB_ENV"

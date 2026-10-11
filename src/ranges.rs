@@ -5,7 +5,8 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use crate::core::{
-    MAX_RANGES, MAX_V4_COVERAGE, MAX_V6_COVERAGE, prefix_match_v4, prefix_match_v6, range_is_safe,
+    MAX_RANGES, MAX_V4_COVERAGE, MAX_V6_COVERAGE, coverage_within, prefix_match_v4,
+    prefix_match_v6, range_is_safe,
 };
 
 /// The published list on 2026-10-11 (`GET /client/v4/ips`).
@@ -218,16 +219,15 @@ impl CloudflareRanges {
         if list.is_empty() {
             return Err(RangeError::Empty);
         }
-        let (mut v4, mut v6) = (0u128, 0u128);
-        for range in &list {
-            let total = if range.network.is_ipv4() {
-                &mut v4
-            } else {
-                &mut v6
-            };
-            *total = total.saturating_add(range.size());
-        }
-        if v4 > MAX_V4_COVERAGE || v6 > MAX_V6_COVERAGE {
+        let sizes = |v4: bool| -> Vec<u128> {
+            list.iter()
+                .filter(|r| r.network.is_ipv4() == v4)
+                .map(IpRange::size)
+                .collect()
+        };
+        if !coverage_within(&sizes(true), MAX_V4_COVERAGE)
+            || !coverage_within(&sizes(false), MAX_V6_COVERAGE)
+        {
             return Err(RangeError::TooLarge);
         }
         Ok(Self { ranges: list })
