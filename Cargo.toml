@@ -1,0 +1,42 @@
+[package]
+name = "autumn-plugin-cloudflare"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+description = "Run an autumn-web application behind Cloudflare: real client IP, origin lock, cache tags, and cache purge"
+repository = "https://github.com/autumn-foundation/autumn-plugin-cloudflare"
+readme = "README.md"
+keywords = ["autumn", "cloudflare", "cdn", "proxy", "plugin"]
+categories = ["web-programming::http-server"]
+exclude = ["verification/", ".github/", ".githooks/", "CLAUDE.md", ".gitignore"]
+
+[dependencies]
+autumn-web = { version = "0.8", default-features = false, features = ["http-client"] }
+axum = { version = "0.8", default-features = false }
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "time", "sync"] }
+tower = { version = "0.5", default-features = false }
+tracing = "0.1"
+
+[dev-dependencies]
+axum = "0.8"
+proptest = "1"
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+# Conflicts with rustc `unreachable_pub`, which this crate uses instead.
+redundant_pub_crate = "allow"
