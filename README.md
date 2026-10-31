@@ -1,6 +1,6 @@
 # autumn-plugin-cloudflare
 
-Run an [Autumn](https://autumn-web.app) (`autumn-web` 0.8) application
+Run an [Autumn](https://autumn-web.app) (`autumn-web` 0.9) application
 behind Cloudflare. Add one line. Autumn then uses the visitor IP.
 
 ```rust,no_run

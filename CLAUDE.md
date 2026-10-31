@@ -4,7 +4,7 @@ Guide for agents that work in this repository.
 
 ## What this is
 
-`autumn-plugin-cloudflare`: an Autumn (`autumn-web` 0.8) plugin for apps
+`autumn-plugin-cloudflare`: an Autumn (`autumn-web` 0.9) plugin for apps
 behind Cloudflare. Design: one Tower layer
 (`docs/adr/0001-identity-layer.md`). Planning and acceptance criteria:
 `docs/planning.md` and issue #1.
