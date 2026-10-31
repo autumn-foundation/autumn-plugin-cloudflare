@@ -92,9 +92,11 @@ fn plugin() -> CloudflarePlugin {
 
 #[autumn_web::main]
 async fn main() {
-    autumn_web::app()
-        .plugin(plugin())
-        .routes(routes![whoami, post, purge])
-        .run()
-        .await;
+    Box::pin(
+        autumn_web::app()
+            .plugin(plugin())
+            .routes(routes![whoami, post, purge])
+            .run(),
+    )
+    .await;
 }
