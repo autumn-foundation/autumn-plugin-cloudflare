@@ -1,6 +1,6 @@
 # autumn-plugin-cloudflare
 
-Run an [Autumn](https://autumn-web.app) (`autumn-web` 0.9) application
+Run an [Autumn](https://autumn-web.app) (`autumn-web` 0.10) application
 behind Cloudflare. Add one line. Autumn then uses the visitor IP.
 
 ```rust,no_run
@@ -77,7 +77,7 @@ See [ADR 0001](docs/adr/0001-identity-layer.md) for the reasons.
 
 ```toml
 [dependencies]
-autumn-plugin-cloudflare = "0.1"
+autumn-plugin-cloudflare = "0.2"
 ```
 
 The public API uses types from `http` 1, `axum` 0.8, and `tower` 0.5. A
