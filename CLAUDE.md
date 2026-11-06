@@ -30,6 +30,8 @@ behind Cloudflare. Design: one Tower layer
 
 ## Rules
 
+- README Rust snippets are doctests. Make them compile; use `no_run`, not `ignore`.
+  `tests/doc_snippets.rs` checks the TOML snippets and the version pins in the docs.
 - Process: SPEC, PROOF, RED, GREEN, REFACTOR. Write a test for each behavior.
 - To change a function in `src/core.rs`:
   1. Change the twin in `verification/core.rs`.
