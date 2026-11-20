@@ -1,6 +1,6 @@
 [package]
 name = "autumn-plugin-cloudflare"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.97.0"
 license = "Apache-2.0"
@@ -12,7 +12,7 @@ categories = ["web-programming::http-server"]
 exclude = ["verification/", ".github/", ".githooks/", "CLAUDE.md", ".gitignore"]
 
 [dependencies]
-autumn-web = { version = "0.10", default-features = false, features = ["http-client"] }
+autumn-web = { version = "0.11", default-features = false, features = ["http-client"] }
 axum = { version = "0.8", default-features = false }
 http = "1"
 serde = { version = "1", features = ["derive"] }

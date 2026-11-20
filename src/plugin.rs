@@ -19,7 +19,7 @@ use crate::refresh::spawn_refresh;
 const DEFAULT_RANGES_URL: &str = "https://api.cloudflare.com/client/v4/ips";
 
 /// The shortest refresh interval.
-const MIN_REFRESH: Duration = Duration::from_secs(60);
+const MIN_REFRESH: Duration = Duration::from_mins(1);
 
 /// The IP that the plugin checks against the Cloudflare ranges.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -267,7 +267,7 @@ impl Plugin for CloudflarePlugin {
         Some(
             PluginContract::new(env!("CARGO_PKG_NAME"))
                 .plugin_version(env!("CARGO_PKG_VERSION"))
-                .autumn_web("0.10"),
+                .autumn_web("0.11"),
         )
     }
 }
