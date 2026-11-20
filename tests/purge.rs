@@ -425,7 +425,7 @@ async fn retry_after_is_capped_at_one_hour() {
     let err = cache(&base).purge_tags(["a"]).await.expect_err("429");
     assert!(matches!(
         err,
-        PurgeError::RateLimited { retry_after: Some(d), .. } if d == Duration::from_secs(3600)
+        PurgeError::RateLimited { retry_after: Some(d), .. } if d == Duration::from_hours(1)
     ));
     assert!(err.to_string().contains("3600"), "{err}");
 }

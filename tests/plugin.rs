@@ -49,7 +49,7 @@ fn all_options_build() {
             .lock_origin(true)
             .allow("10.0.0.0/8".parse().expect("range"))
             .require_header(http::HeaderName::from_static("x-origin-auth"), "s")
-            .refresh_ranges(Duration::from_secs(3600))
+            .refresh_ranges(Duration::from_hours(1))
             .ranges_url("https://api.cloudflare.com/client/v4/ips")
             .cache(cache),
     );

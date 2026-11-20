@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::routing::{get, post};
 use serde_json::{Value, json};
 
-const WAIT: Duration = Duration::from_secs(120);
+const WAIT: Duration = Duration::from_mins(2);
 
 /// Returns `(target dir, profile dir)` of this test binary.
 fn dirs() -> (PathBuf, PathBuf) {
